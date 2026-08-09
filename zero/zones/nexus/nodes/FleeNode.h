@@ -17,6 +17,13 @@ namespace nexus {
 // target is blocking the only clear escape out of a corner), it detects the resulting wall bounces
 // and overrides steering to push toward whatever direction has the most open space until it breaks
 // free.
+//
+// Once already at or beyond the desired distance, it no longer needs to burn speed retreating
+// further, so it turns broadside to the target instead of continuing to move. Subspace ships only
+// thrust forward/backward along their current heading, so a dodge is fastest when that heading is
+// already perpendicular to the threat; reactively dodging from a face-on orientation costs a
+// rotation before any real lateral velocity builds up. Facing broadside in advance means
+// DodgeIncomingDamage can convert straight into forward/backward thrust the instant it's needed.
 struct FleeNode : public behavior::BehaviorNode {
   FleeNode(const char* position_key, float target_distance)
       : position_key(position_key), target_distance(target_distance) {}
@@ -44,7 +51,7 @@ struct FleeNode : public behavior::BehaviorNode {
     auto& steering = ctx.bot->bot_controller->steering;
 
     if (IsCornered(*self, ctx)) {
-      Vector2f escape_direction = steering.FindOpenDirection(game);
+      Vector2f escape_direction = FindOpenDirection(game, *self);
 
       steering.Face(game, self->position + escape_direction);
       // Avoid Seek here because it corrects for our current velocity, which fights the escape.
@@ -53,7 +60,23 @@ struct FleeNode : public behavior::BehaviorNode {
       return behavior::ExecuteResult::Success;
     }
 
-    steering.Flee(game, threat_position, distance);
+    Vector2f to_threat = threat_position - self->position;
+
+    if (to_threat.LengthSq() > distance * distance) {
+      // Already far enough away — hold here broadside instead of continuing to move, so we're
+      // ready to dodge along this axis the instant it's needed.
+      Vector2f broadside_direction = GetBroadsideDirection(*self, threat_position);
+
+      steering.Face(game, self->position + broadside_direction);
+      steering.AvoidWalls(game);
+
+      return behavior::ExecuteResult::Success;
+    }
+
+    // Same stand-off behavior as Seek, but blends in wall avoidance so retreating away from the
+    // target steers around walls instead of being driven straight into them.
+    steering.Seek(game, threat_position, distance);
+    steering.AvoidWalls(game);
 
     return behavior::ExecuteResult::Success;
   }
@@ -63,6 +86,50 @@ struct FleeNode : public behavior::BehaviorNode {
   float target_distance = 0.0f;
 
  private:
+  // Casts a ring of rays around the player and returns the direction with the most open space.
+  // Used to break out of corners where the retreat force and the wall avoidance force cancel each
+  // other out instead of producing useful movement.
+  static Vector2f FindOpenDirection(Game& game, const Player& self, float max_distance = 40.0f) {
+    constexpr size_t kSampleCount = 16;
+    constexpr float kTwoPi = 6.28318f;
+
+    float radius = game.connection.settings.ShipSettings[self.ship].GetRadius();
+
+    Vector2f best_direction = self.GetHeading();
+    float best_distance = -1.0f;
+
+    for (size_t i = 0; i < kSampleCount; ++i) {
+      float angle = (kTwoPi / kSampleCount) * i;
+      Vector2f direction = Rotate(Vector2f(1, 0), angle);
+      Vector2f start = self.position + direction * radius;
+
+      CastResult result = game.GetMap().Cast(start, direction, max_distance, self.frequency);
+      float distance = result.hit ? result.distance : max_distance;
+
+      if (distance > best_distance) {
+        best_distance = distance;
+        best_direction = direction;
+      }
+    }
+
+    return best_direction;
+  }
+
+  // Returns whichever perpendicular-to-threat heading is closer to our current facing, so turning
+  // to face it costs the smaller rotation. Either direction along that axis is equally useful for
+  // a forward/backward dodge, since Actuator already picks whichever of forward/backward thrust
+  // requires less rotation to reach.
+  static Vector2f GetBroadsideDirection(const Player& self, const Vector2f& threat_position) {
+    Vector2f away_direction = Normalize(self.position - threat_position);
+    Vector2f broadside = Perpendicular(away_direction);
+
+    if (broadside.Dot(self.GetHeading()) < 0.0f) {
+      broadside = -broadside;
+    }
+
+    return broadside;
+  }
+
   // Tracks consecutive wall bounces so a retreat that's fighting a wall can be detected and broken
   // out of. Kept independent of FollowPathNode's stuck detection since the two track separate
   // movement contexts and 'stuck_corner' resolution doesn't apply here.

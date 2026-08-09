@@ -180,45 +180,6 @@ struct Steering {
     }
   }
 
-  // Same stand-off behavior as Seek, but blends in wall avoidance so retreating away from a
-  // target steers around walls instead of being driven straight into them.
-  void Flee(Game& game, const Vector2f& target, float target_distance) {
-    Seek(game, target, target_distance);
-    AvoidWalls(game);
-  }
-
-  // Casts a ring of rays around the player and returns the direction with the most open space.
-  // Used to break out of corners where the retreat force and the wall avoidance force in Flee
-  // cancel each other out instead of producing useful movement.
-  Vector2f FindOpenDirection(Game& game, float max_distance = 40.0f) {
-    constexpr size_t kSampleCount = 16;
-    constexpr float kTwoPi = 6.28318f;
-
-    Player* self = game.player_manager.GetSelf();
-    if (!self) return Vector2f(0, 0);
-
-    float radius = game.connection.settings.ShipSettings[self->ship].GetRadius();
-
-    Vector2f best_direction = self->GetHeading();
-    float best_distance = -1.0f;
-
-    for (size_t i = 0; i < kSampleCount; ++i) {
-      float angle = (kTwoPi / kSampleCount) * i;
-      Vector2f direction = Rotate(Vector2f(1, 0), angle);
-      Vector2f start = self->position + direction * radius;
-
-      CastResult result = game.GetMap().Cast(start, direction, max_distance, self->frequency);
-      float distance = result.hit ? result.distance : max_distance;
-
-      if (distance > best_distance) {
-        best_distance = distance;
-        best_direction = direction;
-      }
-    }
-
-    return best_direction;
-  }
-
   // Repel self from teammate to avoid synchronized movements
   void AvoidTeam(Game& game, float dist) {
     auto& pm = game.player_manager;
