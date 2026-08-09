@@ -65,6 +65,12 @@ void NexusController::HandleEvent(const ChatEvent& event) {
     // Event::Dispatch(ChatQueueEvent::Public("On my way!"));
   }
 
+  // Temporary diagnostic: log every private message verbatim so we can see the real sender/type/
+  // text the match system actually sends, since the "GO!" match against it below isn't firing.
+  if (event.type == ChatType::Private || event.type == ChatType::RemotePrivate) {
+    Log(LogLevel::Info, "Nexus private chat [type=%d] from '%s': '%s'", (int)event.type, event.sender, event.message);
+  }
+
   // The match system sends "GO!" over private chat once the ready check finishes and the match
   // actually begins. All of the versus behaviors (Fours, Duel, Twos, TwosBox, Threes) set a
   // "match_startup" timer with a blind guess at how long ready-up will take when they leave spec,
