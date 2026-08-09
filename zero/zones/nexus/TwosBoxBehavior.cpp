@@ -26,6 +26,8 @@
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
+#include <zero/zones/nexus/nodes/FleeNode.h>
+#include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 
 #include <zero/zones/nexus/Nexus.h>
 #include "TwosBoxBehavior.h"
@@ -176,6 +178,11 @@ std::unique_ptr<behavior::BehaviorNode> TwosBoxBehavior::CreateTree(behavior::Ex
   // Leash Settings
   constexpr float kLeashDistance = 30.0f;        // Used for low-energy retreating
   constexpr float kLeashDistanceAttack = 20.0f;  // Used for default attack distance
+
+  // How close a wall needs to be before we override movement to steer clear of it while fleeing.
+  constexpr float kWallCheckDistance = 5.0f;
+  // How far out to search for an opening once a wall is too close.
+  constexpr float kWallOpeningDistance = 35.0f;
 
   // Misc
   constexpr float kAvoidTeamDistance = 8.0f;    // Check to ensure we're not all stacked
@@ -331,18 +338,15 @@ std::unique_ptr<behavior::BehaviorNode> TwosBoxBehavior::CreateTree(behavior::Ex
                                 .End()
                         .Child<DodgeIncomingDamage>(0.1f, kDodgeRangeSlow) //was .3 30
                         .End()
-                    .Sequence()  //Keep enemy distance while reacharging, if within seek range face away from target to help dodging
+                    .Sequence()  //Keep enemy distance while reacharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
-                        .Child<SeekNode>("nearest_aimshot", kLeashDistance, SeekNode::DistanceResolveType::Dynamic)  
-                        .Sequence(CompositeDecorator::Success) // Face away from target when at leash range
-                            .InvertChild<DistanceThresholdNode>("nearest_enemy_position", kLeashDistance + 2.0f)  
-                            .Child<DistanceThresholdNode>("nearest_enemy_position", kLeashDistance - 2.0f)  
-                            .Child<PerpendicularNode>("nearest_enemy_position", "self_position", "away_dir", true)
-                            .Child<VectorSubtractNode>("nearest_enemy_position", "self_position", "target_direction", true)
-                            .Child<VectorAddNode>("away_dir", "target_direction", "away_dir", true)
-                            .Child<VectorAddNode>("self_position", "away_dir", "away_pos")
-                            .Child<VectorNode>("away_pos", "face_position")
-                            .Child<FaceNode>("face_position")
+                        // FleeNode handles facing away from the target itself once at leash range, but the dodge
+                        // block above still reads a stale "target_direction" from last tick to widen its distance
+                        // threshold when moving fast, so keep computing it here.
+                        .Child<VectorSubtractNode>("nearest_enemy_position", "self_position", "target_direction", true)
+                        .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
+                            .Child<FleeNode>("nearest_aimshot", kLeashDistance)
                             .End()
                         .End()
                     .Sequence() // Path to teammate if far away

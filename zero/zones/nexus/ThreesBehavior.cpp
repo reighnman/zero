@@ -19,10 +19,12 @@
 #include <zero/behavior/nodes/TimerNode.h>
 #include <zero/behavior/nodes/WaypointNode.h>
 #include <zero/zones/nexus/Nexus.h>
+#include <zero/zones/nexus/nodes/FleeNode.h>
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/nexus/nodes/NearestTeammateNode.h>
 #include <zero/zones/nexus/nodes/NearestTeammatePlayerPositionQueryNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
+#include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/svs/nodes/BurstAreaQueryNode.h>
 #include <zero/zones/svs/nodes/DynamicPlayerBoundingBoxQueryNode.h>
 #include <zero/zones/svs/nodes/FindNearestGreenNode.h>
@@ -134,6 +136,11 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
 
   constexpr float kAvoidTeamDistance = 6.0f;
 
+  // How close a wall needs to be before we override movement to steer clear of it while fleeing.
+  constexpr float kWallCheckDistance = 5.0f;
+  // How far out to search for an opening once a wall is too close.
+  constexpr float kWallOpeningDistance = 35.0f;
+
   //.Child<ReadConfigIntNode<u16>>("queue_command1", "command1")
   //.Child<ReadConfigIntNode<u16>>("queue_command2", "command2")
   //.Child<ReadConfigIntNode<u16>>("queue_command3", "command3")
@@ -157,9 +164,9 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
             .Child<EqualityNode<u16>>("self_freq", 8025)  //Check spec
             .Child<ScalarNode>(1.0f, "spectating")
             .End()
-        .Sequence() // Match startup begins when we get taken out of spec (since we sit in spec when waiting) 
-            .Child<BlackboardSetQueryNode>("spectating")  //We just came out of spectating 
-            .Child<TimerSetNode>("match_startup", 600)  //Trigger match start timer (assumming 3 sec + however long it takes the other person to ready up)
+        .Sequence() // Match startup begins when we get taken out of spec (since we sit in spec when waiting)
+            .Child<BlackboardSetQueryNode>("spectating")  //We just came out of spectating
+            .Child<TimerSetNode>("match_startup", 3000)  //Safety net only - Nexus.cpp expires this immediately once it sees the "GO!" match start message over private chat.
             .Child<BlackboardEraseNode>("spectating")
             .End()
         .Sequence() // Enter the specified ship if not already in it and have been taken out of spec.
@@ -291,7 +298,10 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                             .InvertChild<TimerExpiredNode>("recharge_timer")
                             .InvertChild<TimerExpiredNode>("bomb_disengage")
                             .End()
-                        .Child<SeekNode>("aimshot", kLeashDistance, SeekNode::DistanceResolveType::Dynamic)
+                        .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
+                            .Child<FleeNode>("aimshot", kLeashDistance)
+                            .End()
                         .End()
                     .Sequence() // Path to teammate if far away
                         .Child<TimerExpiredNode>("match_startup") 
