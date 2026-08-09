@@ -164,9 +164,9 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
             .Child<EqualityNode<u16>>("self_freq", 8025)  //Check spec
             .Child<ScalarNode>(1.0f, "spectating")
             .End()
-        .Sequence() // Match startup begins when we get taken out of spec (since we sit in spec when waiting) 
-            .Child<BlackboardSetQueryNode>("spectating")  //We just came out of spectating 
-            .Child<TimerSetNode>("match_startup", 600)  //Trigger match start timer (assumming 3 sec + however long it takes the other person to ready up)
+        .Sequence() // Match startup begins when we get taken out of spec (since we sit in spec when waiting)
+            .Child<BlackboardSetQueryNode>("spectating")  //We just came out of spectating
+            .Child<TimerSetNode>("match_startup", 3000)  //Safety net only - Nexus.cpp expires this immediately once it sees the "GO!" match start message over private chat.
             .Child<BlackboardEraseNode>("spectating")
             .End()
         .Sequence() // Enter the specified ship if not already in it and have been taken out of spec.

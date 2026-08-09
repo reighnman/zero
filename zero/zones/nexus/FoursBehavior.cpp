@@ -166,9 +166,9 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
             .Child<EqualityNode<u16>>("self_freq", 8025)  //Check spec
             .Child<ScalarNode>(1.0f, "spectating")
             .End()
-        .Sequence() // Match startup begins when we get taken out of spec (since we sit in spec when waiting) 
-            .Child<BlackboardSetQueryNode>("spectating")  //We just came out of spectating 
-            .Child<TimerSetNode>("match_startup", 600)  //Trigger match start timer (assumming 3 sec + however long it takes the other person to ready up)
+        .Sequence() // Match startup begins when we get taken out of spec (since we sit in spec when waiting)
+            .Child<BlackboardSetQueryNode>("spectating")  //We just came out of spectating
+            .Child<TimerSetNode>("match_startup", 3000)  //Safety net only - Nexus.cpp expires this immediately once it sees the "GO!" match start message over private chat.
             .Child<BlackboardEraseNode>("spectating")
             .End()
         .Sequence() // Enter the specified ship if not already in it and have been taken out of spec.
@@ -319,7 +319,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                             .End()
                         .Parallel()
                             .Child<FaceNode>("aimshot")
-                            .Child<BlackboardEraseNode>("rushing")
+                            .Child<BlackboardEraseNode>("rushing") // Clear rushing status
                             .Sequence(CompositeDecorator::Success) // Juke away from moderate incoming threats without breaking aim off the target.
                                 .Child<DodgeJukeNode>(30.0f)
                                 .End()
@@ -329,17 +329,17 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                     .InvertChild<DistanceThresholdNode>("target_position", "self_position", kRushDistanceThreshold)
                                     .InvertChild<ScalarThresholdNode<float>>("target_energy", kLowEnergyRushThreshold)
                                     .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
-                                    .Child<ScalarNode>(1.0f, "rushing")
+                                    .Child<ScalarNode>(1.0f, "rushing") // set rushing status 
                                     .Sequence(CompositeDecorator::Success) //Optionally rocket if the target is too far and we have decent energy
-                                        .Child<ShipItemCountThresholdNode>(ShipItemType::Rocket)
-                                        .Child<PlayerEnergyPercentThresholdNode>(0.6f)
+                                        .Child<ShipItemCountThresholdNode>(ShipItemType::Rocket) // check we have rocket items
+                                        .Child<PlayerEnergyPercentThresholdNode>(0.6f) // check we have sufficient energy
                                         .InvertChild<DistanceThresholdNode>("target_position", 30.0f)  //dont rocket if too far away
                                         .Child<DistanceThresholdNode>("target_position", 10.0f)  //dont rocket if right on them you'll overshoot
-                                        .Child<TimerExpiredNode>("rocket_timer")
-                                        .Child<InputActionNode>(InputAction::Rocket)
-                                        .Child<TimerSetNode>("rocket_timer", 1500)
+                                        .Child<TimerExpiredNode>("rocket_timer") // check cooldown period
+                                        .Child<InputActionNode>(InputAction::Rocket) // use rockets
+                                        .Child<TimerSetNode>("rocket_timer", 1500) // set a rocket cooldown period
                                         .End()
-                                    .Child<BlackboardEraseNode>("recharge_timer")
+                                    .Child<BlackboardEraseNode>("recharge_timer") // remove recharge status as we're going in for the kill
                                     .End()
                                 .Sequence() 
                                     .InvertChild<PlayerEnergyPercentThresholdNode>(0.35f)
@@ -359,28 +359,28 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                     .End()
                                 .End()
                             .Sequence(CompositeDecorator::Success) // Bomb fire check.
-                                .Child<TimerExpiredNode>("match_startup") 
-                                .Child<TimerExpiredNode>("recharge_timer") 
-                                .Child<VectorSubtractNode>("aimshot", "self_position", "target_direction", true)
-                                .Child<PlayerVelocityQueryNode>("self_velocity")
-                                .Child<VectorDotNode>("self_velocity", "target_direction", "forward_velocity")
-                                .Child<ScalarThresholdNode<float>>("forward_velocity", 2.0f)
-                                .Child<PlayerEnergyPercentThresholdNode>(0.45f)
-                                .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb)
-                                .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
-                                .InvertChild<InputQueryNode>(InputAction::Thor)
-                                .Child<IncomingDamageQueryNode>("target", kRepelDistance * 2.5f, 2.75f, "outgoing_damage")
+                                .Child<TimerExpiredNode>("match_startup") // Ensure match countdown timer has expired
+                                .Child<TimerExpiredNode>("recharge_timer")  // Ensure we're not still in a fleeing state
+                                .Child<VectorSubtractNode>("aimshot", "self_position", "target_direction", true) //check target aim
+                                .Child<PlayerVelocityQueryNode>("self_velocity") // get our current velocity
+                                .Child<VectorDotNode>("self_velocity", "target_direction", "forward_velocity")  // compare our velocity to target
+                                .Child<ScalarThresholdNode<float>>("forward_velocity", 2.0f) // confirm velocity is sufficient
+                                .Child<PlayerEnergyPercentThresholdNode>(0.45f) // ensure we have enough energy to fire
+                                .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb) // ensure bombs are ready to fire
+                                .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb) // ensure bombs are off cooldown
+                                .InvertChild<InputQueryNode>(InputAction::Thor) 
+                                .Child<IncomingDamageQueryNode>("target", kRepelDistance * 2.5f, 2.75f, "outgoing_damage") // check outgoing damage to target
                                 .Child<ScalarThresholdNode<float>>("outgoing_damage", kBombRequiredDamageOverlap) // Check if we have enough bullets overlapping outgoing damage to fire a bomb into.
                                 .InvertChild<DistanceThresholdNode>("nearest_target_position", 50.0f)  //dont bomb from too far
                                 .Child<DistanceThresholdNode>("nearest_target_position", 12.0f)  //dont pb yourself (dont use target here in case a teammate is on top)
-                                .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity")
-                                .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray")
-                                .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
-                                .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
+                                .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity") // check bomb velocity
+                                .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray") // check collision ray
+                                .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f) // check target hit box
+                                .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds") 
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
                                 .Child<RenderRayNode>("world_camera", "bomb_fire_ray", 50.0f, Vector3f(1.0f, 1.0f, 0.0f))
                                 .Child<RayRectangleInterceptNode>("bomb_fire_ray", "target_bounds")
-                                .Child<InputActionNode>(InputAction::Bomb)
+                                .Child<InputActionNode>(InputAction::Bomb) // fire bomb
                                 .End()
                             .Sequence(CompositeDecorator::Success) // PB thor fire check.
                                 .Child<TimerExpiredNode>("match_startup")
@@ -400,8 +400,8 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Child<InputActionNode>(InputAction::Thor) //Thor
                                 .End()
                             .Sequence(CompositeDecorator::Success) // Determine if a shot should be fired by using weapon trajectory and bounding boxes.
-                                .Child<TimerExpiredNode>("match_startup")             
-                                .Child<TimerExpiredNode>("recharge_timer") 
+                                .Child<TimerExpiredNode>("match_startup") // Ensure match countdown timer has expired            
+                                .Child<TimerExpiredNode>("recharge_timer") // Ensure we're not still in a fleeing state
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
