@@ -9,14 +9,13 @@
 namespace zero {
 namespace nexus {
 
-// Retreats away from a target while staying wall-aware, for defensive kiting/leashing.
+// Retreats away from a target, for defensive kiting/leashing.
 //
 // Plain Seek-based retreats push straight away from the target with no regard for the map, so a
 // bot backing away in a straight line can get driven into a wall or corner and pinned there. This
-// blends in wall avoidance so it curves around obstacles, and if it still ends up wedged (e.g. the
-// target is blocking the only clear escape out of a corner), it detects the resulting wall bounces
-// and overrides steering to push toward whatever direction has the most open space until it breaks
-// free.
+// blends in gentle wall avoidance while retreating, but relies on WallAvoidanceNode being checked
+// ahead of it in the tree to override and steer clear before that happens - this node alone isn't
+// enough to get out of a corner once actually wedged in one.
 //
 // Once already at or beyond the desired distance, it no longer needs to burn speed retreating
 // further, so it turns broadside to the target instead of continuing to move. Subspace ships only
@@ -50,16 +49,6 @@ struct FleeNode : public behavior::BehaviorNode {
     auto& game = *ctx.bot->game;
     auto& steering = ctx.bot->bot_controller->steering;
 
-    if (IsCornered(*self, ctx)) {
-      Vector2f escape_direction = FindOpenDirection(game, *self);
-
-      steering.Face(game, self->position + escape_direction);
-      // Avoid Seek here because it corrects for our current velocity, which fights the escape.
-      steering.force += escape_direction * 1000.0f;
-
-      return behavior::ExecuteResult::Success;
-    }
-
     Vector2f to_threat = threat_position - self->position;
 
     if (to_threat.LengthSq() > distance * distance) {
@@ -86,35 +75,6 @@ struct FleeNode : public behavior::BehaviorNode {
   float target_distance = 0.0f;
 
  private:
-  // Casts a ring of rays around the player and returns the direction with the most open space.
-  // Used to break out of corners where the retreat force and the wall avoidance force cancel each
-  // other out instead of producing useful movement.
-  static Vector2f FindOpenDirection(Game& game, const Player& self, float max_distance = 40.0f) {
-    constexpr size_t kSampleCount = 16;
-    constexpr float kTwoPi = 6.28318f;
-
-    float radius = game.connection.settings.ShipSettings[self.ship].GetRadius();
-
-    Vector2f best_direction = self.GetHeading();
-    float best_distance = -1.0f;
-
-    for (size_t i = 0; i < kSampleCount; ++i) {
-      float angle = (kTwoPi / kSampleCount) * i;
-      Vector2f direction = Rotate(Vector2f(1, 0), angle);
-      Vector2f start = self.position + direction * radius;
-
-      CastResult result = game.GetMap().Cast(start, direction, max_distance, self.frequency);
-      float distance = result.hit ? result.distance : max_distance;
-
-      if (distance > best_distance) {
-        best_distance = distance;
-        best_direction = direction;
-      }
-    }
-
-    return best_direction;
-  }
-
   // Returns whichever perpendicular-to-threat heading is closer to our current facing, so turning
   // to face it costs the smaller rotation. Either direction along that axis is equally useful for
   // a forward/backward dodge, since Actuator already picks whichever of forward/backward thrust
@@ -128,34 +88,6 @@ struct FleeNode : public behavior::BehaviorNode {
     }
 
     return broadside;
-  }
-
-  // Tracks consecutive wall bounces so a retreat that's fighting a wall can be detected and broken
-  // out of. Kept independent of FollowPathNode's stuck detection since the two track separate
-  // movement contexts and 'stuck_corner' resolution doesn't apply here.
-  static bool IsCornered(const Player& self, behavior::ExecuteContext& ctx) {
-    constexpr u32 kCorneredTickThreshold = 50;
-    constexpr u32 kCorneredTickMax = 100;
-
-    u32 last_bounce_tick = ctx.blackboard.ValueOr<u32>("flee_last_bounce_tick", 0U);
-    u32 last_bounce_check = ctx.blackboard.ValueOr<u32>("flee_last_bounce_check", 0U);
-    u32 bounce_count = ctx.blackboard.ValueOr<u32>("flee_bounce_count", 0U);
-
-    u32 tick = GetCurrentTick();
-
-    if (tick != last_bounce_check) {
-      if (last_bounce_tick != self.last_bounce_tick) {
-        if (bounce_count < kCorneredTickMax) ++bounce_count;
-        ctx.blackboard.Set("flee_last_bounce_tick", self.last_bounce_tick);
-      } else if (bounce_count > 0) {
-        --bounce_count;
-      }
-
-      ctx.blackboard.Set("flee_bounce_count", bounce_count);
-      ctx.blackboard.Set<u32>("flee_last_bounce_check", tick);
-    }
-
-    return bounce_count >= kCorneredTickThreshold;
   }
 };
 

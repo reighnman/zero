@@ -25,6 +25,7 @@
 #include <zero/zones/nexus/nodes/NearestTeammateNode.h>
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/nexus/nodes/FleeNode.h>
+#include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
 
@@ -134,6 +135,11 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   constexpr float kLeashDistance = 30.0f;
 
   constexpr float kAvoidTeamDistance = 6.0f;
+
+  // How close a wall needs to be before we override movement to steer clear of it while fleeing.
+  constexpr float kWallCheckDistance = 5.0f;
+  // How far out to search for an opening once a wall is too close.
+  constexpr float kWallOpeningDistance = 35.0f;
 
   //.Child<ReadConfigIntNode<u16>>("queue_command1", "command1")
   //.Child<ReadConfigIntNode<u16>>("queue_command2", "command2")
@@ -283,7 +289,10 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .End()
                     .Sequence()  //Keep enemy distance while reacharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
-                        .Child<FleeNode>("aimshot", kLeashDistance)
+                        .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
+                            .Child<FleeNode>("aimshot", kLeashDistance)
+                            .End()
                         .End()
                     .Sequence() // Path to teammate if far away
                         .InvertChild<BlackboardSetQueryNode>("rushing")
