@@ -65,20 +65,21 @@ void NexusController::HandleEvent(const ChatEvent& event) {
     // Event::Dispatch(ChatQueueEvent::Public("On my way!"));
   }
 
-  // Temporary diagnostic: log every chat message verbatim so we can see the real type/sender/text
-  // the match system actually sends "GO!" as, since it isn't type Private(5) or RemotePrivate(7) -
-  // those are the only ones the match against it below was checking.
-  Log(LogLevel::Info, "Nexus chat [type=%d] from '%s': '%s'", (int)event.type, event.sender, event.message);
+  // Temporary diagnostic: confirmed via testing that the match system's messages come through as
+  // ChatType::Arena (type=0), not Private/RemotePrivate. Keep logging these until "GO!" detection
+  // below is confirmed working, then this can go.
+  if (event.type == ChatType::Arena) {
+    Log(LogLevel::Info, "Nexus arena chat from '%s': '%s'", event.sender, event.message);
+  }
 
-  // The match system sends "GO!" over private chat once the ready check finishes and the match
+  // The match system sends "GO!" as an arena message once the ready check finishes and the match
   // actually begins. All of the versus behaviors (Fours, Duel, Twos, TwosBox, Threes) set a
   // "match_startup" timer with a blind guess at how long ready-up will take when they leave spec,
   // then gate ship entry / pre-fire / engaging on it expiring. Forcing that same key to expire the
   // instant we see "GO!" makes them react to the real match start instead of the guess, without
   // needing any changes in the individual behaviors - the blind timer they set on leaving spec
   // becomes just a safety net in case this message is ever missed.
-  if ((event.type == ChatType::Private || event.type == ChatType::RemotePrivate) &&
-      message.find("GO!") != std::string::npos) {
+  if (event.type == ChatType::Arena && message.find("GO!") != std::string::npos) {
     Log(LogLevel::Info, "Match start message received, expiring match_startup.");
     bot->execute_ctx.blackboard.Set<u32>("match_startup", GetCurrentTick());
   }
