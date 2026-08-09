@@ -24,6 +24,7 @@
 #include <zero/zones/nexus/nodes/NearestTeammateNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
+#include <zero/zones/nexus/nodes/DodgeJukeNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
 #include <zero/zones/svs/nodes/BurstAreaQueryNode.h>
 #include <zero/zones/svs/nodes/DynamicPlayerBoundingBoxQueryNode.h>
@@ -314,9 +315,12 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                             .Child<DistanceThresholdNode>("target_position", kShotSpreadDistanceThreshold)
                             .Child<ShotSpreadNode>("aimshot", 3.0f, 1.0f)
                             .End()
-                        .Parallel()     
+                        .Parallel()
                             .Child<FaceNode>("aimshot")
-                            .Child<BlackboardEraseNode>("rushing")                      
+                            .Child<BlackboardEraseNode>("rushing")
+                            .Sequence(CompositeDecorator::Success) // Juke away from moderate incoming threats without breaking aim off the target.
+                                .Child<DodgeJukeNode>(30.0f)
+                                .End()
                             .Selector()
                                .Sequence() // If there is any low target with in this range prioritize
                                     .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold) //dont go into rush mode with no reps
