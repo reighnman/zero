@@ -141,8 +141,8 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   constexpr float kLowEnergyDistanceThreshold = 20.0f;  // Distance threshold for prio targets
 
   // Don't dodge below this
-  // About 5 bullets' worth, roughly half a bomb - too little to threaten much, worth rushing down.
-  constexpr float kLowEnergyRushThreshold = kReferenceBulletCost * 5.0f;  // 400
+  // About 6 bullets' worth - commit to finishing off a wider range of weakened targets.
+  constexpr float kLowEnergyRushThreshold = kReferenceBulletCost * 6.0f;  // 480
   constexpr float kRushDistanceThreshold = 10.0f;    // We will rush if someone is low energy within this range
   constexpr u32 kRushRepelThreshold = 1;             // If we don't have this many reps dont rush targets
 
@@ -175,8 +175,10 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   // Enter a defensive (recharging) state once our energy drops below this fraction of the
   // target's estimated energy, and don't leave it again until we recover past the higher exit
   // ratio - the gap between the two is a hysteresis band so we don't flicker near parity.
-  constexpr float kEnergyDisadvantageEnterRatio = 0.75f;
-  constexpr float kEnergyDisadvantageExitRatio = 1.0f;
+  // Biased toward staying in the fight: tolerate being further behind before backing off, and
+  // don't require fully catching back up before pressing again.
+  constexpr float kEnergyDisadvantageEnterRatio = 0.65f;
+  constexpr float kEnergyDisadvantageExitRatio = 0.9f;
   // Always treat energy this low as a disadvantage regardless of the target's energy, since being
   // critically low is dangerous even against an equally weak target. About 2 bullets' worth - below
   // this we can barely scratch them and should retreat no matter how they're doing.
