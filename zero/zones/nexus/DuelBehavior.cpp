@@ -128,12 +128,21 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
 
   const Vector2f center(512, 512);
 
-  // Used for target prio
-  constexpr float kLowEnergyThreshold = 800.0f;         // Energy threshold to prio targets
+  // Reference energy economics used to derive the thresholds below instead of guessing at them.
+  // Approximate, ship-specific values - actual costs come from ship settings, these are just round
+  // numbers to reason from.
+  constexpr float kReferenceMaxEnergy = 1700.0f;
+  constexpr float kReferenceBombCost = 750.0f;
+  constexpr float kReferenceBulletCost = 80.0f;
+
+  // Used for target prio. About 10 bullets' worth (~1 bomb + a buffer) - enough that a target above
+  // this can still meaningfully fight back, so don't treat them as safe to disengage from yet.
+  constexpr float kLowEnergyThreshold = kReferenceBulletCost * 10.0f;  // 800
   constexpr float kLowEnergyDistanceThreshold = 20.0f;  // Distance threshold for prio targets
 
   // Don't dodge below this
-  constexpr float kLowEnergyRushThreshold = 400.0f;  // Rush threshold
+  // About 5 bullets' worth, roughly half a bomb - too little to threaten much, worth rushing down.
+  constexpr float kLowEnergyRushThreshold = kReferenceBulletCost * 5.0f;  // 400
   constexpr float kRushDistanceThreshold = 10.0f;    // We will rush if someone is low energy within this range
   constexpr u32 kRushRepelThreshold = 1;             // If we don't have this many reps dont rush targets
 
@@ -147,8 +156,9 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   // How far away a target needs to be before we start varying our shots around the target.
   constexpr float kShotSpreadDistanceThreshold = 40.0f;
 
-  //  If an enemy is near us and we're low energy thor if below this value
-  constexpr float kThorEnemyThreshold = 200.0f;
+  // If an enemy is near us and we're low energy thor if below this value.
+  // About 2.5 bullets' worth - they're too weak to punish a close-range thor commitment.
+  constexpr float kThorEnemyThreshold = kReferenceBulletCost * 2.5f;  // 200
 
   // How far away from a teammate before we regroup
   constexpr float kTeamRange = 40.0f;
@@ -168,8 +178,9 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   constexpr float kEnergyDisadvantageEnterRatio = 0.75f;
   constexpr float kEnergyDisadvantageExitRatio = 1.0f;
   // Always treat energy this low as a disadvantage regardless of the target's energy, since being
-  // critically low is dangerous even against an equally weak target.
-  constexpr float kCriticalEnergyPercent = 0.2f;
+  // critically low is dangerous even against an equally weak target. About 2 bullets' worth - below
+  // this we can barely scratch them and should retreat no matter how they're doing.
+  constexpr float kCriticalEnergyPercent = (kReferenceBulletCost * 2.0f) / kReferenceMaxEnergy;  // ~0.094
 
   // How far ahead (in seconds worth of their smoothed acceleration) to bend predicted aim toward
   // where the target is actually trending, instead of assuming they hold their current velocity.
@@ -302,7 +313,7 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                         .End()
                     .End()
                 .Sequence(CompositeDecorator::Success) // Continuously reassess fight-vs-flee using energy relative to the target, instead of a fixed timer.
-                    .Child<EnergyDisadvantageNode>("target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent)
+                    .Child<EnergyDisadvantageNode>("target", "target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent)
                     .Child<TimerSetNode>("recharge_timer", 200)
                     .End()
                 .Selector()
@@ -407,7 +418,8 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                                 .Child<PlayerVelocityQueryNode>("self_velocity")
                                 .Child<VectorDotNode>("self_velocity", "target_direction", "forward_velocity")
                                 .Child<ScalarThresholdNode<float>>("forward_velocity", 2.0f)
-                                .Child<PlayerEnergyPercentThresholdNode>(0.45f)
+                                // Need enough to actually afford the bomb plus one bullet of reserve afterward.
+                                .Child<PlayerEnergyPercentThresholdNode>((kReferenceBombCost + kReferenceBulletCost) / kReferenceMaxEnergy)  // ~0.49
                                 .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb)
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
                                 .InvertChild<InputQueryNode>(InputAction::Thor)
@@ -449,7 +461,9 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
                                 .Selector()
                                     .Child<BlackboardSetQueryNode>("rushing")
-                                    .Child<PlayerEnergyPercentThresholdNode>(0.35f)
+                                    // Bullets are cheap (~80 energy) - keeping a ~4 bullet reserve is plenty,
+                                    // no need for the much larger buffer this used to require.
+                                    .Child<PlayerEnergyPercentThresholdNode>(kReferenceBulletCost * 4.0f / kReferenceMaxEnergy)  // ~0.19
                                     .End()
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
                                 .InvertChild<InputQueryNode>(InputAction::Bomb) // Don't try to shoot a bullet when shooting a bomb.
