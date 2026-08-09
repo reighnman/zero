@@ -25,6 +25,7 @@
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
+#include <zero/zones/nexus/nodes/EnergyDisadvantageNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
 #include <zero/zones/svs/nodes/BurstAreaQueryNode.h>
 #include <zero/zones/svs/nodes/DynamicPlayerBoundingBoxQueryNode.h>
@@ -140,6 +141,15 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   constexpr float kWallCheckDistance = 5.0f;
   // How far out to search for an opening once a wall is too close.
   constexpr float kWallOpeningDistance = 35.0f;
+
+  // Enter a defensive (recharging) state once our energy drops below this fraction of the
+  // target's estimated energy, and don't leave it again until we recover past the higher exit
+  // ratio - the gap between the two is a hysteresis band so we don't flicker near parity.
+  constexpr float kEnergyDisadvantageEnterRatio = 0.75f;
+  constexpr float kEnergyDisadvantageExitRatio = 1.0f;
+  // Always treat energy this low as a disadvantage regardless of the target's energy, since being
+  // critically low is dangerous even against an equally weak target.
+  constexpr float kCriticalEnergyPercent = 0.2f;
 
   //.Child<ReadConfigIntNode<u16>>("queue_command1", "command1")
   //.Child<ReadConfigIntNode<u16>>("queue_command2", "command2")
@@ -260,6 +270,10 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                         .Child<InputActionNode>(InputAction::Antiwarp)
                         .End()
                     .End()
+                .Sequence(CompositeDecorator::Success) // Continuously reassess fight-vs-flee using energy relative to the target, instead of a fixed timer.
+                    .Child<EnergyDisadvantageNode>("target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent)
+                    .Child<TimerSetNode>("recharge_timer", 200)
+                    .End()
                 .Selector()
                     .Sequence() // Attempt to dodge and use defensive items.
                         .Sequence(CompositeDecorator::Success) // Always check incoming damage so we can use it in repel and portal sequences.
@@ -339,9 +353,8 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                                         .End()
                                     .Child<BlackboardEraseNode>("recharge_timer")
                                     .End()
-                                .Sequence() 
-                                    .InvertChild<PlayerEnergyPercentThresholdNode>(0.35f)
-                                    .Child<TimerSetNode>("recharge_timer", 850)  
+                                .Sequence()
+                                    .Child<BlackboardSetQueryNode>("energy_disadvantaged")  // Set by EnergyDisadvantageNode above, relative to the target instead of a flat self-only threshold.
                                     .Sequence(CompositeDecorator::Success)
                                         .InvertChild<ShipItemCountThresholdNode>(ShipItemType::Repel)
                                         .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Decoy)
