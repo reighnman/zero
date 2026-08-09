@@ -26,6 +26,7 @@
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/nexus/nodes/FleeNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
+#include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
 

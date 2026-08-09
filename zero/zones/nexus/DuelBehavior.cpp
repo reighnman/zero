@@ -23,6 +23,7 @@
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/nexus/nodes/NearestTeammateNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
+#include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
 #include <zero/zones/svs/nodes/BurstAreaQueryNode.h>
 #include <zero/zones/svs/nodes/DynamicPlayerBoundingBoxQueryNode.h>
