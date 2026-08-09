@@ -24,6 +24,7 @@
 #include <zero/zones/svs/nodes/NearbyEnemyWeaponQueryNode.h>
 #include <zero/zones/nexus/nodes/NearestTeammateNode.h>
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
+#include <zero/zones/nexus/nodes/FleeNode.h>
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
 
@@ -282,7 +283,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .End()
                     .Sequence()  //Keep enemy distance while reacharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
-                        .Child<SeekNode>("aimshot", kLeashDistance, SeekNode::DistanceResolveType::Dynamic)
+                        .Child<FleeNode>("aimshot", kLeashDistance)
                         .End()
                     .Sequence() // Path to teammate if far away
                         .InvertChild<BlackboardSetQueryNode>("rushing")
