@@ -169,10 +169,7 @@ void ChatQueue::Update() {
 
         Player* self = chat_controller.player_manager.GetSelf();
         if (self) {
-          // self->name is null-terminated within its own buffer (OnPlayerEnter guarantees a
-          // terminator at index 20), but copying exactly 20 raw bytes here doesn't carry that
-          // terminator over - see the identical fix in ChatController::OnChatPacket.
-          snprintf(controller_entry->sender, sizeof(controller_entry->sender), "%s", self->name);
+          memcpy(controller_entry->sender, self->name, 20);
         }
 
         continue;
@@ -224,10 +221,7 @@ void ChatQueue::Update() {
 
     Player* self = chat_controller.player_manager.GetSelf();
     if (self) {
-      // self->name is null-terminated within its own buffer (OnPlayerEnter guarantees a
-      // terminator at index 20), but copying exactly 20 raw bytes here doesn't carry that
-      // terminator over - see the identical fix in ChatController::OnChatPacket.
-      snprintf(controller_entry->sender, sizeof(controller_entry->sender), "%s", self->name);
+      memcpy(controller_entry->sender, self->name, 20);
     }
   }
 }

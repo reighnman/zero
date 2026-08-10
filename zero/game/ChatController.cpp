@@ -359,12 +359,7 @@ void ChatController::OnChatPacket(u8* packet, size_t size) {
 
   Player* player = player_manager.GetPlayerById(sender_id);
   if (player) {
-    // player->name is null-terminated within its own buffer (OnPlayerEnter guarantees a
-    // terminator at index 20), but copying exactly 20 raw bytes here doesn't carry that
-    // terminator over - a 20+ character name left entry->sender with no null terminator at all,
-    // and every consumer that treats it as a C-string (starting with the std::string constructor
-    // in Nexus.cpp's chat handler) would read off the end of the buffer looking for one.
-    snprintf(entry->sender, sizeof(entry->sender), "%s", player->name);
+    memcpy(entry->sender, player->name, 20);
 
     char prefix = GetChatTypePrefix(type);
 
@@ -406,13 +401,7 @@ void ChatController::OnChatPacket(u8* packet, size_t size) {
 ChatEntry* ChatController::PushEntry(const char* mesg, size_t size, ChatType type) {
   ChatEntry* entry = entries + (entry_index++ % ZERO_ARRAY_SIZE(entries));
 
-  // Don't assume the caller's buffer already carries a null terminator within it - callers pass
-  // the raw packet payload length, which is only terminated if the server happened to include one.
-  // Every consumer downstream (starting with the std::string construction in Nexus.cpp's chat
-  // handler, run on every chat event) treats entry->message as a C-string.
-  size_t copy_size = size < sizeof(entry->message) ? size : sizeof(entry->message) - 1;
-  memcpy(entry->message, mesg, copy_size);
-  entry->message[copy_size] = 0;
+  memcpy(entry->message, mesg, size);
   entry->sender[0] = 0;
   entry->type = type;
   entry->sound = 0;
