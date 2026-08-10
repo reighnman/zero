@@ -299,21 +299,6 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                         .Child<InputActionNode>(InputAction::Multifire)  //Turn off multifire
                         .End()
                     .End()
-                .Selector(CompositeDecorator::Success) // Toggle antiwarp based on energy
-                    .Sequence() // Enable antiwarp if we are healthy
-                        .Child<TimerExpiredNode>("tchat_safe_timer")  
-                        .Child<ShipCapabilityQueryNode>(ShipCapability_Antiwarp)
-                        .Child<PlayerEnergyPercentThresholdNode>(0.75f)
-                        .InvertChild<PlayerStatusQueryNode>(Status_Antiwarp)
-                        .Child<InputActionNode>(InputAction::Antiwarp)
-                        .End()
-                    .Sequence() // Disable antiwarp if we aren't healthy
-                        .Child<ShipCapabilityQueryNode>(ShipCapability_Antiwarp)
-                        .InvertChild<PlayerEnergyPercentThresholdNode>(0.75f)
-                        .Child<PlayerStatusQueryNode>(Status_Antiwarp)
-                        .Child<InputActionNode>(InputAction::Antiwarp)
-                        .End()
-                    .End()
                 .Sequence(CompositeDecorator::Success) // Continuously reassess fight-vs-flee using energy relative to the target, instead of a fixed timer.
                     .Child<EnergyDisadvantageNode>("target", "target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent)
                     .Child<TimerSetNode>("recharge_timer", 200)
