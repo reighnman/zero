@@ -26,6 +26,8 @@
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
+#include <zero/zones/nexus/nodes/PredictiveAimNode.h>
+#include <zero/zones/nexus/nodes/TargetAccelerationNode.h>
 #include <zero/zones/nexus/nodes/FleeNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 
@@ -103,9 +105,18 @@ struct SeekFromWallNode : public behavior::BehaviorNode {
   float search_distance = 0.0f;
 };
 
+// Wobbles the aimshot perpendicular to the aim line, scaled by how much the target has actually
+// been accelerating (from TargetAccelerationNode) instead of a blind constant spread. A target
+// holding a steady course gets shot at precisely; only a genuinely maneuvering target gets spread
+// fire to hedge against.
 struct ShotSpreadNode : public behavior::BehaviorNode {
-  ShotSpreadNode(const char* aimshot_key, float spread, float period)
-      : aimshot_key(aimshot_key), spread(spread), period(period) {}
+  ShotSpreadNode(const char* aimshot_key, const char* acceleration_key, float max_spread,
+                 float maneuvering_normalizer, float period)
+      : aimshot_key(aimshot_key),
+        acceleration_key(acceleration_key),
+        max_spread(max_spread),
+        maneuvering_normalizer(maneuvering_normalizer),
+        period(period) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -115,15 +126,22 @@ struct ShotSpreadNode : public behavior::BehaviorNode {
     if (!opt_aimshot) return behavior::ExecuteResult::Failure;
     Vector2f aimshot = *opt_aimshot;
 
+    Vector2f acceleration = ctx.blackboard.ValueOr<Vector2f>(acceleration_key, Vector2f(0, 0));
+    float maneuvering = acceleration.Length();
+
+    float spread_scale = maneuvering_normalizer > 0.0f ? maneuvering / maneuvering_normalizer : 0.0f;
+    if (spread_scale > 1.0f) spread_scale = 1.0f;
+    if (spread_scale < 0.0f) spread_scale = 0.0f;
+
+    float spread = max_spread * spread_scale;
+
     Vector2f aim_direction = Normalize(aimshot - self->position);
     Vector2f perp = Perpendicular(aim_direction);
 
-    if (period <= 0.0f) {
-      period = 1.0f;
-    }
+    float use_period = period > 0.0f ? period : 1.0f;
 
     float t = GetTime();
-    aimshot += perp * sinf(t / period) * spread;
+    aimshot += perp * sinf(t / use_period) * spread;
 
     ctx.blackboard.Set(aimshot_key, aimshot);
 
@@ -133,7 +151,9 @@ struct ShotSpreadNode : public behavior::BehaviorNode {
   inline float GetTime() { return GetMicrosecondTick() / (kTickDurationMicro * 10.0f); }
 
   const char* aimshot_key = nullptr;
-  float spread = 0.0f;
+  const char* acceleration_key = nullptr;
+  float max_spread = 0.0f;
+  float maneuvering_normalizer = 1.0f;
   float period = 1.0f;
 };
 
@@ -189,6 +209,15 @@ std::unique_ptr<behavior::BehaviorNode> TwosBoxBehavior::CreateTree(behavior::Ex
   constexpr float kAvoidEnemyDistance = 10.0f;  // Additional check when pathing to prevent enemies from sitting on us
   constexpr float kMultiFireDistance = 35.0f;   // Use multifire for targets over this range
   constexpr float kAvoidWallDistance = 3.0f;
+
+  // How far ahead (in seconds worth of their smoothed acceleration) to bend predicted aim toward
+  // where the target is actually trending, instead of assuming they hold their current velocity.
+  constexpr float kAimLeadBiasSeconds = 0.2f;
+
+  // Acceleration magnitude (units/sec^2) treated as "fully erratic" for shot spread purposes - a
+  // target maneuvering at or above this gets the full spread, below it gets scaled-down spread.
+  // Starting guess, needs tuning against real play.
+  constexpr float kShotSpreadManeuveringNormalizer = 4.0f;
 
   // clang-format off
   builder
@@ -250,12 +279,14 @@ std::unique_ptr<behavior::BehaviorNode> TwosBoxBehavior::CreateTree(behavior::Ex
                     .Child<NearestMemoryTargetNode>("nearest_enemy") //Always track nearest enemey
                     .Child<PlayerPositionQueryNode>("nearest_enemy", "nearest_enemy_position") //Always track nearest enemy position so we can use it for some checks
                     .Child<PlayerEnergyQueryNode>("nearest_enemy", "nearest_enemy_energy")
-                    .Child<AimNode>(WeaponType::Bullet, "nearest_enemy", "nearest_aimshot")
+                    .Child<TargetAccelerationNode>("nearest_enemy", "nearest_enemy_acceleration")
+                    .Child<PredictiveAimNode>(WeaponType::Bullet, "nearest_enemy", "nearest_enemy_acceleration", "nearest_aimshot", kAimLeadBiasSeconds)
                     .Sequence() // Default targert is nearest
                         .Child<NearestMemoryTargetNode>("target")
                         .Child<PlayerPositionQueryNode>("target", "target_position")
                         .Child<PlayerEnergyQueryNode>("target", "target_energy")
-                        .Child<AimNode>(WeaponType::Bullet, "target", "aimshot")
+                        .Child<TargetAccelerationNode>("target", "target_acceleration")
+                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds)
                         .End()
                      .Sequence() // If is someone low nearby override target instead of just using nearest
                         .Child<TimerExpiredNode>("recharge_timer") //if we're recharging we should always be leashing to nearest enemy so ignore low health
@@ -265,9 +296,10 @@ std::unique_ptr<behavior::BehaviorNode> TwosBoxBehavior::CreateTree(behavior::Ex
                         .InvertChild<DistanceThresholdNode>("lowest_target_position", "self_position", kLowEnergyDistanceThreshold)
                         .InvertChild<ScalarThresholdNode<float>>("lowest_target_energy", kLowEnergyThreshold)
                         .Child<LowestTargetNode>("target")
-                        .Child<PlayerPositionQueryNode>("target", "target_position")  //Override 
+                        .Child<PlayerPositionQueryNode>("target", "target_position")  //Override
                         .Child<PlayerEnergyQueryNode>("target", "target_energy")  //Override
-                        .Child<AimNode>(WeaponType::Bullet, "target", "aimshot") //Override
+                        .Child<TargetAccelerationNode>("target", "target_acceleration")  //Override
+                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds) //Override
                         .End()
                 .End()
                 .Sequence(CompositeDecorator::Success) // If we have a portal but no location, lay one down.
@@ -338,6 +370,13 @@ std::unique_ptr<behavior::BehaviorNode> TwosBoxBehavior::CreateTree(behavior::Ex
                                 .End()
                         .Child<DodgeIncomingDamage>(0.1f, kDodgeRangeSlow) //was .3 30
                         .End()
+                    .Sequence() // Keep distance from the nearest enemy during ready-check instead of sitting still until the match officially starts.
+                        .InvertChild<TimerExpiredNode>("match_startup")
+                        .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
+                            .Child<FleeNode>("nearest_enemy_position", kLeashDistance)
+                            .End()
+                        .End()
                     .Sequence()  //Keep enemy distance while reacharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
                         // FleeNode handles facing away from the target itself once at leash range, but the dodge
@@ -372,7 +411,7 @@ std::unique_ptr<behavior::BehaviorNode> TwosBoxBehavior::CreateTree(behavior::Ex
                         .Child<TimerExpiredNode>("match_startup") 
                         .Sequence(CompositeDecorator::Success)
                             .Child<DistanceThresholdNode>("target_position", kShotSpreadDistanceThreshold)
-                            .Child<ShotSpreadNode>("aimshot", 3.0f, 1.0f)
+                            .Child<ShotSpreadNode>("aimshot", "target_acceleration", 3.0f, kShotSpreadManeuveringNormalizer, 1.0f)
                             .End()
                         .Parallel()     
                             .Child<FaceNode>("aimshot")
