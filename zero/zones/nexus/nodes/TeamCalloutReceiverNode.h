@@ -1,11 +1,14 @@
 #pragma once
 
 #include <zero/BotController.h>
+#include <zero/ChatQueue.h>
 #include <zero/RegionRegistry.h>
 #include <zero/ZeroBot.h>
 #include <zero/behavior/BehaviorTree.h>
 #include <zero/game/Game.h>
 #include <zero/game/Logger.h>
+
+#include <cstdio>
 
 namespace zero {
 namespace nexus {
@@ -18,7 +21,7 @@ namespace nexus {
 // `priority_ticks` after we first notice a given callout - a teammate re-broadcasting the same
 // target doesn't restart the window, but a new target name does. On success, writes the resolved
 // Player* to `target_output_key` so the caller can treat it exactly like any other target
-// override.
+// override, and acknowledges the callout in team chat once per target actually confirmed in range.
 //
 // Applies the same validity checks LowestTargetNode/NearestMemoryTargetNode use elsewhere in these
 // trees (respawning, zeroed position, network sync, pathfinding-reachable, not in a safe tile) so a
@@ -58,6 +61,19 @@ struct TeamCalloutReceiverNode : public behavior::BehaviorNode {
 
     if (self->position.DistanceSq(callout_target->position) > range * range) {
       return behavior::ExecuteResult::Failure;
+    }
+
+    // Let the team know the callout was picked up - once per target we actually confirm and start
+    // prioritizing, not every tick we continue to act on it.
+    std::string acknowledged_name =
+        ctx.blackboard.ValueOr<std::string>("team_callout_acknowledged_name", std::string());
+
+    if (callout_name != acknowledged_name) {
+      ctx.blackboard.Set<std::string>("team_callout_acknowledged_name", callout_name);
+
+      char message[64];
+      snprintf(message, sizeof(message), "On it, %s!", callout_target->name);
+      ctx.bot->bot_controller->chat_queue.SendFrequency(self->frequency, message);
     }
 
     ctx.blackboard.Set(target_output_key, callout_target);
