@@ -169,7 +169,9 @@ void ChatQueue::Update() {
 
         Player* self = chat_controller.player_manager.GetSelf();
         if (self) {
-          memcpy(controller_entry->sender, self->name, 20);
+          // Same fix as ChatController::OnChatPacket - carry the null terminator over instead of
+          // copying exactly 20 raw bytes.
+          snprintf(controller_entry->sender, sizeof(controller_entry->sender), "%s", self->name);
         }
 
         continue;
@@ -221,7 +223,9 @@ void ChatQueue::Update() {
 
     Player* self = chat_controller.player_manager.GetSelf();
     if (self) {
-      memcpy(controller_entry->sender, self->name, 20);
+      // Same fix as ChatController::OnChatPacket - carry the null terminator over instead of
+      // copying exactly 20 raw bytes.
+      snprintf(controller_entry->sender, sizeof(controller_entry->sender), "%s", self->name);
     }
   }
 }
