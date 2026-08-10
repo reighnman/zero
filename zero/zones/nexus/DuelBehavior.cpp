@@ -208,7 +208,7 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
             .Child<TimerExpiredNode>("queue")
             .Child<ChatMessageNode>(ChatMessageNode::Public("?next duelpub"))
             .Child<ChatMessageNode>(ChatMessageNode::Public("?return")) 
-            .Child<TimerSetNode>("queue", 6000)
+            .Child<TimerSetNode>("queue", 3000)
             //.Child<ScalarNode>(1.0f, "queued")  //was only joining queue on join then stopped working
             .End()
         .Sequence() // Don't do anything while in spec
@@ -344,6 +344,13 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                             .InvertChild<DistanceThresholdNode>("target_position", "self_position", kRushDistanceThreshold)
                             .End()
                         .Child<DodgeIncomingDamage>(0.2f, 30.0f)
+                        .End()
+                    .Sequence() // Keep distance from the target during ready-check instead of sitting still until the match officially starts.
+                        .InvertChild<TimerExpiredNode>("match_startup")
+                        .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
+                            .Child<FleeNode>("target_position", kLeashDistance)
+                            .End()
                         .End()
                     .Sequence()  //Keep enemy distance while reacharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
