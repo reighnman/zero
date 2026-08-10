@@ -38,9 +38,7 @@ struct NexusController : ZoneController, EventHandler<ChatEvent> {
 static NexusController controller;
 
 void NexusController::HandleEvent(const ChatEvent& event) {
-  // Match TrenchWars.cpp's pattern: filter on event.type first and return before touching
-  // event.sender/event.message at all, instead of unconditionally constructing std::strings from
-  // every chat event regardless of type. We only ever care about Team and Arena messages here -
+  // We only ever care about Team and Arena messages here -
   // no reason to build strings out of Public/Private/Channel/etc. traffic we never look at.
   if (event.type == ChatType::Team) {
     std::string sender = event.sender;

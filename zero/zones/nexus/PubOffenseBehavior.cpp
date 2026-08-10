@@ -20,6 +20,7 @@
 #include <zero/zones/svs/nodes/IncomingDamageQueryNode.h>
 #include <zero/zones/svs/nodes/MemoryTargetNode.h>
 #include <zero/zones/svs/nodes/NearbyEnemyWeaponQueryNode.h>
+#include <zero/zones/nexus/nodes/ShotSpreadNode.h>
 
 #include "PubOffenseBehavior.h"
 
@@ -27,40 +28,6 @@ using namespace zero::svs;
 
 namespace zero {
 namespace nexus {
-
-struct ShotSpreadNode : public behavior::BehaviorNode {
-  ShotSpreadNode(const char* aimshot_key, float spread, float period)
-      : aimshot_key(aimshot_key), spread(spread), period(period) {}
-
-  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
-    Player* self = ctx.bot->game->player_manager.GetSelf();
-    if (!self || self->ship >= 8) return behavior::ExecuteResult::Failure;
-
-    auto opt_aimshot = ctx.blackboard.Value<Vector2f>(aimshot_key);
-    if (!opt_aimshot) return behavior::ExecuteResult::Failure;
-    Vector2f aimshot = *opt_aimshot;
-
-    Vector2f aim_direction = Normalize(aimshot - self->position);
-    Vector2f perp = Perpendicular(aim_direction);
-
-    if (period <= 0.0f) {
-      period = 1.0f;
-    }
-
-    float t = GetTime();
-    aimshot += perp * sinf(t / period) * spread;
-
-    ctx.blackboard.Set(aimshot_key, aimshot);
-
-    return behavior::ExecuteResult::Success;
-  }
-
-  inline float GetTime() { return GetMicrosecondTick() / (kTickDurationMicro * 10.0f); }
-
-  const char* aimshot_key = nullptr;
-  float spread = 0.0f;
-  float period = 1.0f;
-};
 
 std::unique_ptr<behavior::BehaviorNode> PubOffenseBehavior::CreateTree(behavior::ExecuteContext& ctx) {
   using namespace behavior;

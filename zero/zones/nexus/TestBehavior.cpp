@@ -27,6 +27,7 @@
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
 #include <zero/zones/nexus/nodes/FleeNode.h>
+#include <zero/zones/nexus/nodes/ShotSpreadNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 
 #include "TestBehavior.h"
@@ -71,40 +72,6 @@ struct SeekFromWallNode : public behavior::BehaviorNode {
   }
 
   float search_distance = 0.0f;
-};
-
-struct ShotSpreadNode : public behavior::BehaviorNode {
-  ShotSpreadNode(const char* aimshot_key, float spread, float period)
-      : aimshot_key(aimshot_key), spread(spread), period(period) {}
-
-  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
-    Player* self = ctx.bot->game->player_manager.GetSelf();
-    if (!self || self->ship >= 8) return behavior::ExecuteResult::Failure;
-
-    auto opt_aimshot = ctx.blackboard.Value<Vector2f>(aimshot_key);
-    if (!opt_aimshot) return behavior::ExecuteResult::Failure;
-    Vector2f aimshot = *opt_aimshot;
-
-    Vector2f aim_direction = Normalize(aimshot - self->position);
-    Vector2f perp = Perpendicular(aim_direction);
-
-    if (period <= 0.0f) {
-      period = 1.0f;
-    }
-
-    float t = GetTime();
-    aimshot += perp * sinf(t / period) * spread;
-
-    ctx.blackboard.Set(aimshot_key, aimshot);
-
-    return behavior::ExecuteResult::Success;
-  }
-
-  inline float GetTime() { return GetMicrosecondTick() / (kTickDurationMicro * 10.0f); }
-
-  const char* aimshot_key = nullptr;
-  float spread = 0.0f;
-  float period = 1.0f;
 };
 
 std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::ExecuteContext& ctx) {
@@ -186,7 +153,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                         .Child<PlayerPositionQueryNode>("target", "nearest_target_position") //Addionally copy to nearest so we can use it later
                         .Child<AimNode>(WeaponType::Bullet, "target", "nearest_aimshot")
                         .End()
-                     .Sequence() //If is someone low nearby override target 
+                     .Sequence() //If is someone low nearby override target
                         .Child<TimerExpiredNode>("recharge_timer") //Nearest target should be used when recharing
                         .Child<LowestTargetNode>("lowest_target")
                         .Child<PlayerPositionQueryNode>("lowest_target", "lowest_target_position")
@@ -194,7 +161,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                         .InvertChild<DistanceThresholdNode>("lowest_target_position", "self_position", kLowEnergyDistanceThreshold)
                         .InvertChild<ScalarThresholdNode<float>>("lowest_target_energy", kLowEnergyThreshold)
                         .Child<LowestTargetNode>("target")
-                        .Child<PlayerPositionQueryNode>("target", "target_position")  //Override 
+                        .Child<PlayerPositionQueryNode>("target", "target_position")  //Override
                         .Child<PlayerEnergyQueryNode>("target", "target_energy")  //Override
                         .Child<AimNode>(WeaponType::Bullet, "target", "aimshot") //Override
                         .End()

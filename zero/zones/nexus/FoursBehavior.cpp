@@ -31,6 +31,7 @@
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
 #include <zero/zones/nexus/nodes/PredictiveAimNode.h>
+#include <zero/zones/nexus/nodes/ShotSpreadNode.h>
 #include <zero/zones/nexus/nodes/TargetAccelerationNode.h>
 
 #include <zero/zones/nexus/Nexus.h>
@@ -68,58 +69,6 @@ struct Placeholder : public behavior::BehaviorNode {
   }
 
   const char* something = nullptr;
-};
-
-// Wobbles the aimshot perpendicular to the aim line, scaled by how much the target has actually
-// been accelerating (from TargetAccelerationNode) instead of a blind constant spread. A target
-// holding a steady course gets shot at precisely; only a genuinely maneuvering target gets spread
-// fire to hedge against.
-struct ShotSpreadNode : public behavior::BehaviorNode {
-  ShotSpreadNode(const char* aimshot_key, const char* acceleration_key, float max_spread,
-                 float maneuvering_normalizer, float period)
-      : aimshot_key(aimshot_key),
-        acceleration_key(acceleration_key),
-        max_spread(max_spread),
-        maneuvering_normalizer(maneuvering_normalizer),
-        period(period) {}
-
-  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
-    Player* self = ctx.bot->game->player_manager.GetSelf();
-    if (!self || self->ship >= 8) return behavior::ExecuteResult::Failure;
-
-    auto opt_aimshot = ctx.blackboard.Value<Vector2f>(aimshot_key);
-    if (!opt_aimshot) return behavior::ExecuteResult::Failure;
-    Vector2f aimshot = *opt_aimshot;
-
-    Vector2f acceleration = ctx.blackboard.ValueOr<Vector2f>(acceleration_key, Vector2f(0, 0));
-    float maneuvering = acceleration.Length();
-
-    float spread_scale = maneuvering_normalizer > 0.0f ? maneuvering / maneuvering_normalizer : 0.0f;
-    if (spread_scale > 1.0f) spread_scale = 1.0f;
-    if (spread_scale < 0.0f) spread_scale = 0.0f;
-
-    float spread = max_spread * spread_scale;
-
-    Vector2f aim_direction = Normalize(aimshot - self->position);
-    Vector2f perp = Perpendicular(aim_direction);
-
-    float use_period = period > 0.0f ? period : 1.0f;
-
-    float t = GetTime();
-    aimshot += perp * sinf(t / use_period) * spread;
-
-    ctx.blackboard.Set(aimshot_key, aimshot);
-
-    return behavior::ExecuteResult::Success;
-  }
-
-  inline float GetTime() { return GetMicrosecondTick() / (kTickDurationMicro * 10.0f); }
-
-  const char* aimshot_key = nullptr;
-  const char* acceleration_key = nullptr;
-  float max_spread = 0.0f;
-  float maneuvering_normalizer = 1.0f;
-  float period = 1.0f;
 };
 
 std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::ExecuteContext& ctx) {
@@ -355,7 +304,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .Child<TimerExpiredNode>("match_startup") 
                         .Sequence(CompositeDecorator::Success)
                             .Child<DistanceThresholdNode>("target_position", kShotSpreadDistanceThreshold)
-                            .Child<ShotSpreadNode>("aimshot", "target_acceleration", 3.0f, kShotSpreadManeuveringNormalizer, 1.0f)
+                            .Child<ShotSpreadNode>("aimshot", 3.0f, 1.0f, "target_acceleration", kShotSpreadManeuveringNormalizer)
                             .End()
                         .Parallel()
                             .Child<FaceNode>("aimshot")
