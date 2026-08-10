@@ -32,7 +32,6 @@
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
 #include <zero/zones/nexus/nodes/PredictiveAimNode.h>
 #include <zero/zones/nexus/nodes/TargetAccelerationNode.h>
-#include <zero/zones/nexus/nodes/TeamCalloutNode.h>
 
 using namespace zero::svs;
 
@@ -169,9 +168,6 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
   // Starting guess, needs tuning against real play.
   constexpr float kShotSpreadManeuveringNormalizer = 4.0f;
 
-  // How often we're allowed to call out a low-energy target to team chat, so it doesn't spam every
-  // tick while continuing to engage the same weak target.
-  constexpr u32 kTeamCalloutCooldownTicks = 1000;  // 10 seconds
 
 
   //.Child<ReadConfigIntNode<u16>>("queue_command1", "command1")
@@ -360,10 +356,6 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
                         .Parallel()
                             .Child<FaceNode>("aimshot")
                             .Child<BlackboardEraseNode>("rushing")
-                            .Sequence(CompositeDecorator::Success) // Call out a low-energy target to team chat so nearby teammates can help finish them off.
-                                .InvertChild<ScalarThresholdNode<float>>("target_energy", kLowEnergyRushThreshold)
-                                .Child<TeamCalloutNode>("target", "team_callout_timer", kTeamCalloutCooldownTicks)
-                                .End()
                             .Selector()
                                .Sequence() // If there is any low target with in this range prioritize
                                     .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold) //dont go into rush mode with no reps
