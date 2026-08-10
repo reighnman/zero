@@ -173,7 +173,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                         .Child<PlayerPositionQueryNode>("target", "nearest_target_position") //Addionally copy to nearest so we can use it later
                         .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "nearest_aimshot", kAimLeadBiasSeconds)
                         .End()
-                     .Sequence() //If is someone low nearby override target
+                     .Sequence(CompositeDecorator::Success) //If is someone low nearby override target
                         .Child<TimerExpiredNode>("recharge_timer") //Nearest target should be used when recharing
                         .Child<LowestTargetNode>("lowest_target")
                         .Child<PlayerPositionQueryNode>("lowest_target", "lowest_target_position")
