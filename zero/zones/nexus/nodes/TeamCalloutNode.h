@@ -20,10 +20,17 @@ struct TeamCalloutNode : public behavior::BehaviorNode {
       : target_player_key(target_player_key), cooldown_key(cooldown_key), cooldown_ticks(cooldown_ticks) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
+    // Same discipline as TrenchWars.cpp's chat handler: validate everything about what we're
+    // about to touch before doing any string formatting or sending - don't assume a Player*
+    // pulled off the blackboard is still a live, valid target just because it's non-null.
     auto opt_target = ctx.blackboard.Value<Player*>(target_player_key);
     if (!opt_target || !*opt_target) return behavior::ExecuteResult::Failure;
 
     Player* target = *opt_target;
+    if (target->ship >= 8) return behavior::ExecuteResult::Failure;
+
+    Player* self = ctx.bot->game->player_manager.GetSelf();
+    if (!self || target->frequency == self->frequency) return behavior::ExecuteResult::Failure;
 
     u32 tick = GetCurrentTick();
     u32 timeout = ctx.blackboard.ValueOr<u32>(cooldown_key, 0U);

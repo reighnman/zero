@@ -38,50 +38,39 @@ struct NexusController : ZoneController, EventHandler<ChatEvent> {
 static NexusController controller;
 
 void NexusController::HandleEvent(const ChatEvent& event) {
-  std::string sender = event.sender;
-  std::string message = event.message;
+  // Match TrenchWars.cpp's pattern: filter on event.type first and return before touching
+  // event.sender/event.message at all, instead of unconditionally constructing std::strings from
+  // every chat event regardless of type. We only ever care about Team and Arena messages here -
+  // no reason to build strings out of Public/Private/Channel/etc. traffic we never look at.
+  if (event.type == ChatType::Team) {
+    std::string sender = event.sender;
+    std::string message = event.message;
 
-
-  auto& chat_queue = bot->bot_controller->chat_queue;
-
-
-  if (event.type == ChatType::Team && message.find("SAFE") != std::string::npos &&
-      !(message.find("NOT") != std::string::npos)) {
-
+    if (message.find("SAFE") != std::string::npos && message.find("NOT") == std::string::npos) {
       // SAFE
-    Log(LogLevel::Info, "Setting tchat_safe");
-    bot->execute_ctx.blackboard.Set("tchat_safe", sender);
-    bot->execute_ctx.blackboard.Set<u32>("tchat_safe_timer", GetCurrentTick() + 600);
-
-    // Event::Dispatch(ChatQueueEvent::Public("On my way!"));
-  } else if (event.type == ChatType::Team && message.find("SAFE") != std::string::npos &&
-
+      Log(LogLevel::Info, "Setting tchat_safe");
+      bot->execute_ctx.blackboard.Set("tchat_safe", sender);
+      bot->execute_ctx.blackboard.Set<u32>("tchat_safe_timer", GetCurrentTick() + 600);
+    } else if (message.find("SAFE") != std::string::npos && message.find("NOT") != std::string::npos) {
       // NOT SAFE
-    message.find("NOT") != std::string::npos) {
-    Log(LogLevel::Info, "Setting tchat_notsafe");
-    bot->execute_ctx.blackboard.Set("tchat_notsafe", sender);
-    bot->execute_ctx.blackboard.Set<u32>("tchat_notsafe_timer", GetCurrentTick() + 600);
+      Log(LogLevel::Info, "Setting tchat_notsafe");
+      bot->execute_ctx.blackboard.Set("tchat_notsafe", sender);
+      bot->execute_ctx.blackboard.Set<u32>("tchat_notsafe_timer", GetCurrentTick() + 600);
+    }
+  } else if (event.type == ChatType::Arena) {
+    std::string message = event.message;
 
-    // Event::Dispatch(ChatQueueEvent::Public("On my way!"));
-  }
-
-  // Temporary diagnostic: confirmed via testing that the match system's messages come through as
-  // ChatType::Arena (type=0), not Private/RemotePrivate. Keep logging these until "GO!" detection
-  // below is confirmed working, then this can go.
-  if (event.type == ChatType::Arena) {
-    Log(LogLevel::Info, "Nexus arena chat from '%s': '%s'", event.sender, event.message);
-  }
-
-  // The match system sends "GO!" as an arena message once the ready check finishes and the match
-  // actually begins. All of the versus behaviors (Fours, Duel, Twos, TwosBox, Threes) set a
-  // "match_startup" timer with a blind guess at how long ready-up will take when they leave spec,
-  // then gate ship entry / pre-fire / engaging on it expiring. Forcing that same key to expire the
-  // instant we see "GO!" makes them react to the real match start instead of the guess, without
-  // needing any changes in the individual behaviors - the blind timer they set on leaving spec
-  // becomes just a safety net in case this message is ever missed.
-  if (event.type == ChatType::Arena && message.find("GO!") != std::string::npos) {
-    Log(LogLevel::Info, "Match start message received, expiring match_startup.");
-    bot->execute_ctx.blackboard.Set<u32>("match_startup", GetCurrentTick());
+    // The match system sends "GO!" as an arena message once the ready check finishes and the
+    // match actually begins. All of the versus behaviors (Fours, Duel, Twos, TwosBox, Threes) set
+    // a "match_startup" timer with a blind guess at how long ready-up will take when they leave
+    // spec, then gate ship entry / pre-fire / engaging on it expiring. Forcing that same key to
+    // expire the instant we see "GO!" makes them react to the real match start instead of the
+    // guess, without needing any changes in the individual behaviors - the blind timer they set
+    // on leaving spec becomes just a safety net in case this message is ever missed.
+    if (message.find("GO!") != std::string::npos) {
+      Log(LogLevel::Info, "Match start message received, expiring match_startup.");
+      bot->execute_ctx.blackboard.Set<u32>("match_startup", GetCurrentTick());
+    }
   }
 }
 
