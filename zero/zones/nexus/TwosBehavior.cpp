@@ -19,6 +19,7 @@
 #include <zero/behavior/nodes/TimerNode.h>
 #include <zero/behavior/nodes/WaypointNode.h>
 #include <zero/zones/nexus/Nexus.h>
+#include <zero/zones/nexus/nodes/EnergyDisadvantageNode.h>
 #include <zero/zones/nexus/nodes/FleeNode.h>
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/nexus/nodes/NearestTeammateNode.h>
@@ -118,6 +119,15 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
   // target maneuvering at or above this gets the full spread, below it gets scaled-down spread.
   // Starting guess, needs tuning against real play.
   constexpr float kShotSpreadManeuveringNormalizer = 4.0f;
+
+  // Enter a defensive (recharging) state once our energy drops below this fraction of the
+  // target's estimated energy, and don't leave it again until we recover past the higher exit
+  // ratio - the gap between the two is a hysteresis band so we don't flicker near parity.
+  constexpr float kEnergyDisadvantageEnterRatio = 0.65f;
+  constexpr float kEnergyDisadvantageExitRatio = 0.9f;
+  // Always treat energy this low as a disadvantage regardless of the target's energy, since being
+  // critically low is dangerous even against an equally weak target.
+  constexpr float kCriticalEnergyPercent = 0.094f;
 
   // How often we're allowed to call out a low-energy target to team chat, so it doesn't spam every
   // tick while continuing to engage the same weak target.
@@ -256,6 +266,10 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
                         .Child<InputActionNode>(InputAction::Antiwarp)
                         .End()
                     .End()
+                .Sequence(CompositeDecorator::Success) // Continuously reassess fight-vs-flee using energy relative to the target, instead of a fixed timer.
+                    .Child<EnergyDisadvantageNode>("target", "target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent)
+                    .Child<TimerSetNode>("recharge_timer", 200)
+                    .End()
                 .Selector()
                     .Sequence() // Attempt to dodge and use defensive items.
                         .Sequence(CompositeDecorator::Success) // Always check incoming damage so we can use it in repel and portal sequences.
@@ -292,6 +306,7 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
                         .End()
                     .Sequence()  //Keep enemy distance while reacharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
+                        .Child<TimerExpiredNode>("team_callout_priority_expiry") // Don't retreat from a target we're actively pursuing on a teammate's callout.
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
                             .Child<FleeNode>("aimshot", kLeashDistance)
@@ -344,9 +359,8 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
                                         .End()
                                     .Child<BlackboardEraseNode>("recharge_timer")
                                     .End()
-                                .Sequence() 
-                                    .InvertChild<PlayerEnergyPercentThresholdNode>(0.35f)
-                                    .Child<TimerSetNode>("recharge_timer", 850)  
+                                .Sequence()
+                                    .Child<BlackboardSetQueryNode>("energy_disadvantaged")  // Set by EnergyDisadvantageNode above, relative to the target instead of a flat self-only threshold.
                                     .Sequence(CompositeDecorator::Success)
                                         .InvertChild<ShipItemCountThresholdNode>(ShipItemType::Repel)
                                         .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Decoy)
