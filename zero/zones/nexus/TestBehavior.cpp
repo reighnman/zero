@@ -27,7 +27,9 @@
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
 #include <zero/zones/nexus/nodes/FleeNode.h>
+#include <zero/zones/nexus/nodes/PredictiveAimNode.h>
 #include <zero/zones/nexus/nodes/ShotSpreadNode.h>
+#include <zero/zones/nexus/nodes/TargetAccelerationNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 
 #include "TestBehavior.h"
@@ -100,6 +102,12 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // How far away a target needs to be before we start varying our shots around the target.
   constexpr float kShotSpreadDistanceThreshold = 40.0f;
 
+  // How much a maneuvering target's acceleration is allowed to bend the aim lead, capped by flight time.
+  constexpr float kAimLeadBiasSeconds = 0.2f;
+
+  // How much target acceleration is needed to reach full shot spread.
+  constexpr float kShotSpreadManeuveringNormalizer = 4.0f;
+
   //  If an enemy is near us and we're low energy thor if below this value
   constexpr float kThorEnemyThreshold = 200.0f;
 
@@ -149,9 +157,10 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                         .Child<NearestMemoryTargetNode>("target")
                         .Child<PlayerPositionQueryNode>("target", "target_position")
                         .Child<PlayerEnergyQueryNode>("target", "target_energy")
-                        .Child<AimNode>(WeaponType::Bullet, "target", "aimshot")
+                        .Child<TargetAccelerationNode>("target", "target_acceleration")
+                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds)
                         .Child<PlayerPositionQueryNode>("target", "nearest_target_position") //Addionally copy to nearest so we can use it later
-                        .Child<AimNode>(WeaponType::Bullet, "target", "nearest_aimshot")
+                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "nearest_aimshot", kAimLeadBiasSeconds)
                         .End()
                      .Sequence() //If is someone low nearby override target
                         .Child<TimerExpiredNode>("recharge_timer") //Nearest target should be used when recharing
@@ -163,7 +172,8 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                         .Child<LowestTargetNode>("target")
                         .Child<PlayerPositionQueryNode>("target", "target_position")  //Override
                         .Child<PlayerEnergyQueryNode>("target", "target_energy")  //Override
-                        .Child<AimNode>(WeaponType::Bullet, "target", "aimshot") //Override
+                        .Child<TargetAccelerationNode>("target", "target_acceleration")  //Override
+                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds) //Override
                         .End()
                 .End()
                 .Sequence(CompositeDecorator::Success) // If we have a portal but no location, lay one down.
@@ -254,7 +264,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                         .Child<TimerExpiredNode>("match_startup") 
                         .Sequence(CompositeDecorator::Success)
                             .Child<DistanceThresholdNode>("target_position", kShotSpreadDistanceThreshold)
-                            .Child<ShotSpreadNode>("aimshot", 3.0f, 1.0f)
+                            .Child<ShotSpreadNode>("aimshot", 3.0f, 1.0f, "target_acceleration", kShotSpreadManeuveringNormalizer)
                             .End()
                         .Parallel()     
                             .Child<FaceNode>("aimshot")

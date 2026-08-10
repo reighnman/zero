@@ -22,6 +22,8 @@
 #include <zero/zones/svs/nodes/IncomingDamageQueryNode.h>
 #include <zero/zones/svs/nodes/MemoryTargetNode.h>
 #include <zero/zones/svs/nodes/NearbyEnemyWeaponQueryNode.h>
+#include <zero/zones/nexus/nodes/PredictiveAimNode.h>
+#include <zero/zones/nexus/nodes/TargetAccelerationNode.h>
 
 using namespace zero::svs;
 
@@ -34,6 +36,9 @@ std::unique_ptr<behavior::BehaviorNode> PubCoverBehavior::CreateTree(behavior::E
   BehaviorBuilder builder;
 
   const Vector2f center(512, 512);
+
+  // How much a maneuvering target's acceleration is allowed to bend the aim lead, capped by flight time.
+  constexpr float kAimLeadBiasSeconds = 0.2f;
 
   // clang-format off
   builder
@@ -97,7 +102,8 @@ std::unique_ptr<behavior::BehaviorNode> PubCoverBehavior::CreateTree(behavior::E
                         .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
                         .End()
                     .Sequence() // Aim at target and shoot while seeking them.
-                        .Child<AimNode>(WeaponType::Bullet, "nearest_target", "aimshot")
+                        .Child<TargetAccelerationNode>("nearest_target", "nearest_target_acceleration")
+                        .Child<PredictiveAimNode>(WeaponType::Bullet, "nearest_target", "nearest_target_acceleration", "aimshot", kAimLeadBiasSeconds)
                         .Parallel()
                             .Selector() // Select between hovering around a territory position and seeking to enemy.
                                 .Sequence()
