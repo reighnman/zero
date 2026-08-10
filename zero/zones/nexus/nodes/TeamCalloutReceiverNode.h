@@ -1,6 +1,7 @@
 #pragma once
 
 #include <zero/BotController.h>
+#include <zero/RegionRegistry.h>
 #include <zero/ZeroBot.h>
 #include <zero/behavior/BehaviorTree.h>
 #include <zero/game/Game.h>
@@ -17,7 +18,11 @@ namespace nexus {
 // `priority_ticks` after we first notice a given callout - a teammate re-broadcasting the same
 // target doesn't restart the window, but a new target name does. On success, writes the resolved
 // Player* to `target_output_key` so the caller can treat it exactly like any other target
-// override (LowestTargetNode elsewhere in these trees does the same thing).
+// override.
+//
+// Applies the same validity checks LowestTargetNode/NearestMemoryTargetNode use elsewhere in these
+// trees (respawning, zeroed position, network sync, pathfinding-reachable, not in a safe tile) so a
+// teammate's callout can't hand us a target we have no real way to act on.
 struct TeamCalloutReceiverNode : public behavior::BehaviorNode {
   TeamCalloutReceiverNode(const char* target_output_key, float range, u32 priority_ticks)
       : target_output_key(target_output_key), range(range), priority_ticks(priority_ticks) {}
@@ -44,9 +49,12 @@ struct TeamCalloutReceiverNode : public behavior::BehaviorNode {
     u32 expiry = ctx.blackboard.ValueOr<u32>("team_callout_priority_expiry", 0U);
     if (TICK_GTE(tick, expiry)) return behavior::ExecuteResult::Failure;
 
-    Player* callout_target = ctx.bot->game->player_manager.GetPlayerByName(callout_name.c_str());
-    if (!callout_target || callout_target->ship >= 8) return behavior::ExecuteResult::Failure;
-    if (callout_target->frequency == self->frequency) return behavior::ExecuteResult::Failure;
+    auto& game = *ctx.bot->game;
+
+    Player* callout_target = game.player_manager.GetPlayerByName(callout_name.c_str());
+    if (!IsValidTarget(game, *self, callout_target, *ctx.bot->bot_controller->region_registry)) {
+      return behavior::ExecuteResult::Failure;
+    }
 
     if (self->position.DistanceSq(callout_target->position) > range * range) {
       return behavior::ExecuteResult::Failure;
@@ -60,6 +68,35 @@ struct TeamCalloutReceiverNode : public behavior::BehaviorNode {
   const char* target_output_key = nullptr;
   float range = 0.0f;
   u32 priority_ticks = 0;
+
+ private:
+  // Mirrors LowestTargetNode/NearestMemoryTargetNode's validity checks so a teammate's callout
+  // can't override us onto a target those nodes would never have picked themselves.
+  static bool IsValidTarget(Game& game, const Player& self, Player* target, RegionRegistry& region_registry) {
+    if (!target) return false;
+    if (target->ship >= 8) return false;
+    if (target->frequency == self.frequency) return false;
+    if (target->IsRespawning()) return false;
+    if (target->position == Vector2f(0, 0)) return false;
+    if (!IsSynchronized(game, *target)) return false;
+    if (!region_registry.IsConnected(self.position, target->position)) return false;
+
+    bool in_safe = game.connection.map.GetTileId(target->position) == kTileIdSafe;
+    if (in_safe) return false;
+
+    return true;
+  }
+
+  static bool IsSynchronized(Game& game, Player& player) {
+    // If the player is within our view, but we haven't received any packets, then they left where
+    // we last saw them and should be ignored.
+    if (game.radar.InRadarView(player.position)) {
+      return game.player_manager.IsSynchronized(player);
+    }
+
+    // Try to path to where we last saw the player until their old position is in view.
+    return true;
+  }
 };
 
 }  // namespace nexus
