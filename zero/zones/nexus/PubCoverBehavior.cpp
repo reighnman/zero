@@ -24,6 +24,8 @@
 #include <zero/zones/svs/nodes/NearbyEnemyWeaponQueryNode.h>
 #include <zero/zones/nexus/nodes/PredictiveAimNode.h>
 #include <zero/zones/nexus/nodes/TargetAccelerationNode.h>
+#include <zero/zones/nexus/nodes/TeamCalloutNode.h>
+#include <zero/zones/nexus/nodes/TeamCalloutReceiverNode.h>
 
 using namespace zero::svs;
 
@@ -39,6 +41,18 @@ std::unique_ptr<behavior::BehaviorNode> PubCoverBehavior::CreateTree(behavior::E
 
   // How much a maneuvering target's acceleration is allowed to bend the aim lead, capped by flight time.
   constexpr float kAimLeadBiasSeconds = 0.2f;
+
+  // Below this energy, call out the target to team chat so nearby teammates can help finish them off.
+  constexpr float kLowEnergyRushThreshold = 400.0f;
+
+  // How often we're allowed to call out a low-energy target to team chat, so it doesn't spam every
+  // tick while continuing to engage the same weak target.
+  constexpr u32 kTeamCalloutCooldownTicks = 1000;  // 10 seconds
+
+  // If a teammate calls out a low-energy target within this range, prioritize it as our own target
+  // for kTeamCalloutPriorityTicks.
+  constexpr float kTeamCalloutRange = 40.0f;
+  constexpr u32 kTeamCalloutPriorityTicks = 500;  // 5 seconds
 
   // clang-format off
   builder
@@ -57,10 +71,18 @@ std::unique_ptr<behavior::BehaviorNode> PubCoverBehavior::CreateTree(behavior::E
             .End()
         .Selector() // Choose to fight the player or follow waypoints.
             .Sequence() // Find nearest target and either path to them or seek them directly.
-                .Sequence()
-                    .Child<PlayerPositionQueryNode>("self_position")
-                    .Child<NearestMemoryTargetNode>("nearest_target")
-                    .Child<PlayerPositionQueryNode>("nearest_target", "nearest_target_position")
+                .Child<PlayerPositionQueryNode>("self_position")
+                .Selector() // Prioritize a teammate's low-energy callout within range, otherwise fall back to the nearest target.
+                    .Sequence() // If a teammate called out a nearby low-energy target, prioritize it for a while.
+                        .Child<TeamCalloutReceiverNode>("nearest_target", kTeamCalloutRange, kTeamCalloutPriorityTicks)
+                        .Child<PlayerPositionQueryNode>("nearest_target", "nearest_target_position")
+                        .Child<PlayerEnergyQueryNode>("nearest_target", "nearest_target_energy")
+                        .End()
+                    .Sequence()
+                        .Child<NearestMemoryTargetNode>("nearest_target")
+                        .Child<PlayerPositionQueryNode>("nearest_target", "nearest_target_position")
+                        .Child<PlayerEnergyQueryNode>("nearest_target", "nearest_target_energy")
+                        .End()
                     .End()
                 .Sequence(CompositeDecorator::Success) // If we have a portal but no location, lay one down.
                     .Child<ShipItemCountThresholdNode>(ShipItemType::Portal, 1)
@@ -142,6 +164,10 @@ std::unique_ptr<behavior::BehaviorNode> PubCoverBehavior::CreateTree(behavior::E
                                     .Child<RepelDistanceQueryNode>("repel_distance")
                                     .Child<IncomingDamageQueryNode>("repel_distance", "incoming_damage")
                                     .Child<PlayerCurrentEnergyQueryNode>("self_energy")
+                                    .End()
+                                .Sequence(CompositeDecorator::Success) // Call out a low-energy target to team chat so nearby teammates can help finish them off.
+                                    .InvertChild<ScalarThresholdNode<float>>("nearest_target_energy", kLowEnergyRushThreshold)
+                                    .Child<TeamCalloutNode>("nearest_target", "team_callout_timer", kTeamCalloutCooldownTicks)
                                     .End()
                                 .Sequence(CompositeDecorator::Success) // If we are in danger but can't repel, use our portal.
                                     .InvertChild<ShipItemCountThresholdNode>(ShipItemType::Repel)

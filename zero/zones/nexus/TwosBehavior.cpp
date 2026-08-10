@@ -33,6 +33,8 @@
 #include <zero/zones/nexus/nodes/PredictiveAimNode.h>
 #include <zero/zones/nexus/nodes/ShotSpreadNode.h>
 #include <zero/zones/nexus/nodes/TargetAccelerationNode.h>
+#include <zero/zones/nexus/nodes/TeamCalloutNode.h>
+#include <zero/zones/nexus/nodes/TeamCalloutReceiverNode.h>
 
 using namespace zero::svs;
 
@@ -117,7 +119,14 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
   // Starting guess, needs tuning against real play.
   constexpr float kShotSpreadManeuveringNormalizer = 4.0f;
 
+  // How often we're allowed to call out a low-energy target to team chat, so it doesn't spam every
+  // tick while continuing to engage the same weak target.
+  constexpr u32 kTeamCalloutCooldownTicks = 1000;  // 10 seconds
 
+  // If a teammate calls out a low-energy target within this range, prioritize it as our own target
+  // for kTeamCalloutPriorityTicks.
+  constexpr float kTeamCalloutRange = 40.0f;
+  constexpr u32 kTeamCalloutPriorityTicks = 500;  // 5 seconds
 
   //.Child<ReadConfigIntNode<u16>>("queue_command1", "command1")
   //.Child<ReadConfigIntNode<u16>>("queue_command2", "command2")
@@ -199,6 +208,13 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
                         .InvertChild<DistanceThresholdNode>("lowest_target_position", "self_position", kLowEnergyDistanceThreshold)
                         .InvertChild<ScalarThresholdNode<float>>("lowest_target_energy", kLowEnergyThreshold)
                         .Child<LowestTargetNode>("target")
+                        .Child<PlayerPositionQueryNode>("target", "target_position")  //Override
+                        .Child<PlayerEnergyQueryNode>("target", "target_energy")  //Override
+                        .Child<TargetAccelerationNode>("target", "target_acceleration")  //Override
+                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds) //Override
+                        .End()
+                     .Sequence() // If a teammate called out a nearby low-energy target, prioritize it too for a while.
+                        .Child<TeamCalloutReceiverNode>("target", kTeamCalloutRange, kTeamCalloutPriorityTicks) //Override
                         .Child<PlayerPositionQueryNode>("target", "target_position")  //Override
                         .Child<PlayerEnergyQueryNode>("target", "target_energy")  //Override
                         .Child<TargetAccelerationNode>("target", "target_acceleration")  //Override
@@ -305,6 +321,10 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
                         .Parallel()
                             .Child<FaceNode>("aimshot")
                             .Child<BlackboardEraseNode>("rushing")
+                            .Sequence(CompositeDecorator::Success) // Call out a low-energy target to team chat so nearby teammates can help finish them off.
+                                .InvertChild<ScalarThresholdNode<float>>("target_energy", kLowEnergyRushThreshold)
+                                .Child<TeamCalloutNode>("target", "team_callout_timer", kTeamCalloutCooldownTicks)
+                                .End()
                             .Selector()
                                .Sequence() // If there is any low target with in this range prioritize
                                     .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold) //dont go into rush mode with no reps
