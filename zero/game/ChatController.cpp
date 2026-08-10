@@ -359,7 +359,12 @@ void ChatController::OnChatPacket(u8* packet, size_t size) {
 
   Player* player = player_manager.GetPlayerById(sender_id);
   if (player) {
-    memcpy(entry->sender, player->name, 20);
+    // player->name is null-terminated within its own buffer (OnPlayerEnter guarantees a
+    // terminator at index 20), but copying exactly 20 raw bytes here doesn't carry that
+    // terminator over - a 20+ character name left entry->sender with no null terminator at all,
+    // and every consumer that treats it as a C-string (starting with the std::string constructor
+    // in Nexus.cpp's chat handler) would read off the end of the buffer looking for one.
+    snprintf(entry->sender, sizeof(entry->sender), "%s", player->name);
 
     char prefix = GetChatTypePrefix(type);
 
