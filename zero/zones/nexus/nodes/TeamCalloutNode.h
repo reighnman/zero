@@ -39,7 +39,11 @@ struct TeamCalloutNode : public behavior::BehaviorNode {
     char message[128];
     snprintf(message, sizeof(message), "Focus %s, low energy!", target->name);
 
-    ctx.bot->bot_controller->chat_queue.SendTeam(message);
+    // Send explicitly via our own frequency instead of ChatQueue::SendTeam(), which would just
+    // re-fetch self and do the same thing indirectly. SendFrequency is what actually sets
+    // entry->type = ChatType::Team (it does so whenever the given frequency matches our own), so
+    // this puts the message on the team chat queue unambiguously.
+    ctx.bot->bot_controller->chat_queue.SendFrequency(self->frequency, message);
 
     ctx.blackboard.Set<u32>(cooldown_key, tick + cooldown_ticks);
 
