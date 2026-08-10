@@ -15,10 +15,16 @@ namespace nexus {
 // they'll hold their current velocity for the whole bullet flight.
 //
 // A true accelerating-projectile intercept has no clean closed form, so this takes a pragmatic
-// shortcut instead: nudge the target's velocity forward by `lead_bias_seconds` worth of their
+// shortcut instead: nudge the target's velocity forward by up to `lead_bias_seconds` worth of their
 // smoothed acceleration before handing it to the same proven constant-velocity solver
 // (behavior::CalculateShot) the shared AimNode uses. That bends the lead toward where the target is
 // actually trending without the risk of deriving a new accelerated solver from scratch.
+//
+// The bias is scaled down by the estimated bullet flight time (distance / weapon speed), capped at
+// `lead_bias_seconds`, rather than always applying the full amount. Close-range shots have a flight
+// time far shorter than lead_bias_seconds, and close range is also exactly when a target is most
+// likely mid-dodge with a large instantaneous acceleration - applying the full nudge there could
+// swing the aimshot by more than the short flight time actually justifies.
 struct PredictiveAimNode : public behavior::BehaviorNode {
   PredictiveAimNode(WeaponType weapon_type, const char* target_player_key, const char* acceleration_key,
                      const char* position_key, float lead_bias_seconds = 0.2f)
@@ -45,9 +51,22 @@ struct PredictiveAimNode : public behavior::BehaviorNode {
 
     Vector2f direction = Normalize(target->position - self->position);
 
+    // Scale the bias down at close range instead of always applying the full lead_bias_seconds -
+    // see the class comment for why.
+    float distance = target->position.Distance(self->position);
+    float weapon_velocity_length = weapon_velocity.Length();
+    float effective_lead_bias = lead_bias_seconds;
+
+    if (weapon_velocity_length > 0.0f) {
+      float estimated_flight_time = distance / weapon_velocity_length;
+      if (estimated_flight_time < effective_lead_bias) {
+        effective_lead_bias = estimated_flight_time;
+      }
+    }
+
     // Bend the target's velocity toward where they're actually trending before handing it to the
     // constant-velocity solver below.
-    Vector2f biased_velocity = target->velocity + acceleration * lead_bias_seconds;
+    Vector2f biased_velocity = target->velocity + acceleration * effective_lead_bias;
 
     float away_amount = biased_velocity.Dot(direction);
 
