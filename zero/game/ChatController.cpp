@@ -406,7 +406,13 @@ void ChatController::OnChatPacket(u8* packet, size_t size) {
 ChatEntry* ChatController::PushEntry(const char* mesg, size_t size, ChatType type) {
   ChatEntry* entry = entries + (entry_index++ % ZERO_ARRAY_SIZE(entries));
 
-  memcpy(entry->message, mesg, size);
+  // Don't assume the caller's buffer already carries a null terminator within it - callers pass
+  // the raw packet payload length, which is only terminated if the server happened to include one.
+  // Every consumer downstream (starting with the std::string construction in Nexus.cpp's chat
+  // handler, run on every chat event) treats entry->message as a C-string.
+  size_t copy_size = size < sizeof(entry->message) ? size : sizeof(entry->message) - 1;
+  memcpy(entry->message, mesg, copy_size);
+  entry->message[copy_size] = 0;
   entry->sender[0] = 0;
   entry->type = type;
   entry->sound = 0;
