@@ -336,6 +336,7 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                             .Child<FaceNode>("aimshot")
                             .Child<BlackboardEraseNode>("rushing")
                             .Sequence(CompositeDecorator::Success) // Call out a low-energy target to team chat so nearby teammates can help finish them off.
+                                .Child<TimerExpiredNode>("team_callout_priority_expiry") // Don't call out while still acting on a teammate's callout.
                                 .InvertChild<ScalarThresholdNode<float>>("target_energy", kLowEnergyRushThreshold)
                                 .Child<TeamCalloutNode>("target", "team_callout_timer", kTeamCalloutCooldownTicks)
                                 .End()

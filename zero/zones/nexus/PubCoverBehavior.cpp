@@ -166,6 +166,7 @@ std::unique_ptr<behavior::BehaviorNode> PubCoverBehavior::CreateTree(behavior::E
                                     .Child<PlayerCurrentEnergyQueryNode>("self_energy")
                                     .End()
                                 .Sequence(CompositeDecorator::Success) // Call out a low-energy target to team chat so nearby teammates can help finish them off.
+                                    .Child<TimerExpiredNode>("team_callout_priority_expiry") // Don't call out while still acting on a teammate's callout.
                                     .InvertChild<ScalarThresholdNode<float>>("nearest_target_energy", kLowEnergyRushThreshold)
                                     .Child<TeamCalloutNode>("nearest_target", "team_callout_timer", kTeamCalloutCooldownTicks)
                                     .End()
