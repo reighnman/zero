@@ -35,8 +35,6 @@
 #include <zero/zones/nexus/nodes/PredictiveAimNode.h>
 #include <zero/zones/nexus/nodes/ShotSpreadNode.h>
 #include <zero/zones/nexus/nodes/TargetAccelerationNode.h>
-#include <zero/zones/nexus/nodes/TeamCalloutNode.h>
-#include <zero/zones/nexus/nodes/TeamCalloutReceiverNode.h>
 
 #include <zero/zones/nexus/Nexus.h>
 #include "FoursBehavior.h"
@@ -90,6 +88,9 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   constexpr float kLowEnergyRushThreshold = 400.0f;  // Rush threshold
   constexpr float kRushDistanceThreshold = 10.0f;    // We will rush if someone is low energy within this range
   constexpr u32 kRushRepelThreshold = 1;             // If we don't have this many reps dont rush targets
+  // Only press a target we've spotted as low energy ourselves if we have enough energy left to
+  // commit to closing the distance - otherwise we'd be diving in already weak.
+  constexpr float kRushMinEnergyPercent = 0.5f;
 
   // Check for incoming damage within this range
   constexpr float kRepelDistance = 7.0f;
@@ -153,15 +154,6 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // Always treat energy this low as a disadvantage regardless of the target's energy, since being
   // critically low is dangerous even against an equally weak target.
   constexpr float kCriticalEnergyPercent = 0.094f;
-
-  // How often we're allowed to call out a low-energy target to team chat, so it doesn't spam every
-  // tick while continuing to engage the same weak target.
-  constexpr u32 kTeamCalloutCooldownTicks = 1000;  // 10 seconds
-
-  // If a teammate calls out a low-energy target within this range, prioritize it as our own target
-  // for kTeamCalloutPriorityTicks.
-  constexpr float kTeamCalloutRange = 40.0f;
-  constexpr u32 kTeamCalloutPriorityTicks = 500;  // 5 seconds
 
   //.Child<ReadConfigIntNode<u16>>("queue_command1", "command1")
   //.Child<ReadConfigIntNode<u16>>("queue_command2", "command2")
@@ -248,13 +240,6 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .Child<TargetAccelerationNode>("target", "target_acceleration")  //Override
                         .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds) //Override
                         .End()
-                     .Sequence() // If a teammate called out a nearby low-energy target, prioritize it too for a while.
-                        .Child<TeamCalloutReceiverNode>("target", kTeamCalloutRange, kTeamCalloutPriorityTicks) //Override
-                        .Child<PlayerPositionQueryNode>("target", "target_position")  //Override
-                        .Child<PlayerEnergyQueryNode>("target", "target_energy")  //Override
-                        .Child<TargetAccelerationNode>("target", "target_acceleration")  //Override
-                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds) //Override
-                        .End()
                 .End()
                 .Sequence(CompositeDecorator::Success) // If we have a portal but no location, lay one down.
                     .Child<ShipItemCountThresholdNode>(ShipItemType::Portal, 1)
@@ -331,7 +316,6 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .End()
                     .Sequence()  //Keep enemy distance while reacharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
-                        .Child<TimerExpiredNode>("team_callout_priority_expiry") // Don't retreat from a target we're actively pursuing on a teammate's callout.
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
                             .Child<FleeNode>("aimshot", kLeashDistance)
@@ -355,14 +339,10 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                             .Sequence(CompositeDecorator::Success) // Juke away from moderate incoming threats without breaking aim off the target.
                                 .Child<DodgeJukeNode>(30.0f)
                                 .End()
-                            .Sequence(CompositeDecorator::Success) // Call out a low-energy target to team chat so nearby teammates can help finish them off.
-                                .Child<TimerExpiredNode>("team_callout_priority_expiry") // Don't call out while still acting on a teammate's callout.
-                                .InvertChild<ScalarThresholdNode<float>>("target_energy", kLowEnergyRushThreshold)
-                                .Child<TeamCalloutNode>("target", "team_callout_timer", kTeamCalloutCooldownTicks)
-                                .End()
                             .Selector()
                                .Sequence() // If there is any low target with in this range prioritize
                                     .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold) //dont go into rush mode with no reps
+                                    .Child<PlayerEnergyPercentThresholdNode>(kRushMinEnergyPercent) //only press if we have enough energy ourselves
                                     .InvertChild<DistanceThresholdNode>("target_position", "self_position", kRushDistanceThreshold)
                                     .InvertChild<ScalarThresholdNode<float>>("target_energy", kLowEnergyRushThreshold)
                                     .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)

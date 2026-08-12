@@ -53,27 +53,6 @@ void NexusController::HandleEvent(const ChatEvent& event) {
       bot->execute_ctx.blackboard.Set("tchat_notsafe", sender);
       bot->execute_ctx.blackboard.Set<u32>("tchat_notsafe_timer", GetCurrentTick() + 600);
     }
-
-    // Bots broadcast "Focus <name>, low energy!" over team chat when they start engaging a weak
-    // target (see TeamCalloutNode). Just extract the named target here and stash it - whether to
-    // actually prioritize them (range, how long) is configurable per-behavior, so that decision
-    // lives in each behavior's tree (see TeamCalloutReceiverNode), not here.
-    static const std::string kCalloutPrefix = "Focus ";
-    static const std::string kCalloutSuffix = ", low energy!";
-
-    if (message.size() > kCalloutPrefix.size() + kCalloutSuffix.size() &&
-        message.compare(0, kCalloutPrefix.size(), kCalloutPrefix) == 0 &&
-        message.compare(message.size() - kCalloutSuffix.size(), kCalloutSuffix.size(), kCalloutSuffix) == 0) {
-      Player* self = bot->game->player_manager.GetSelf();
-
-      if (self && sender != self->name) {
-        std::string target_name =
-            message.substr(kCalloutPrefix.size(), message.size() - kCalloutPrefix.size() - kCalloutSuffix.size());
-
-        Log(LogLevel::Info, "Received team callout for target '%s' from '%s'", target_name.c_str(), sender.c_str());
-        bot->execute_ctx.blackboard.Set<std::string>("team_callout_target_name", target_name);
-      }
-    }
   } else if (event.type == ChatType::Arena) {
     std::string message = event.message;
 

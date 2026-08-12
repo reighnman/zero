@@ -95,6 +95,9 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   constexpr float kLowEnergyRushThreshold = kReferenceBulletCost * 6.0f;  // 480
   constexpr float kRushDistanceThreshold = 10.0f;    // We will rush if someone is low energy within this range
   constexpr u32 kRushRepelThreshold = 1;             // If we don't have this many reps dont rush targets
+  // Only press a target we've spotted as low energy ourselves if we have enough energy left to
+  // commit to closing the distance - otherwise we'd be diving in already weak.
+  constexpr float kRushMinEnergyPercent = 0.5f;
 
   // Check for incoming damage within this range
   constexpr float kRepelDistance = 7.0f;
@@ -335,6 +338,7 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                             .Selector()
                                .Sequence() // If there is any low target with in this range prioritize
                                     .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold) //dont go into rush mode with no reps
+                                    .Child<PlayerEnergyPercentThresholdNode>(kRushMinEnergyPercent) //only press if we have enough energy ourselves
                                     .InvertChild<DistanceThresholdNode>("target_position", "self_position", kRushDistanceThreshold)
                                     .InvertChild<ScalarThresholdNode<float>>("target_energy", kLowEnergyRushThreshold)
                                     .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
