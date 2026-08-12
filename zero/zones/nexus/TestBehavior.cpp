@@ -42,43 +42,6 @@ using namespace zero::svs;
 namespace zero {
 namespace nexus {
 
-// Looks for nearby walls, find away vector, and seek to it.
-// Returns failure if no wall is nearby.
-struct SeekFromWallNode : public behavior::BehaviorNode {
-  SeekFromWallNode(float search_distance) : search_distance(search_distance) {}
-
-  behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
-    auto self = ctx.bot->game->player_manager.GetSelf();
-    if (!self || self->ship >= 8) return behavior::ExecuteResult::Failure;
-
-    Vector2f pos = self->position;
-
-    constexpr Vector2f kSearchDirections[] = {Vector2f(0, -1), Vector2f(1, 0), Vector2f(0, 1), Vector2f(-1, 0)};
-
-    auto& map = ctx.bot->game->connection.map;
-
-    Vector2f away_vector;
-
-    for (Vector2f direction : kSearchDirections) {
-      auto cast = map.CastTo(self->position, self->position + direction * search_distance, self->frequency);
-
-      if (cast.hit) {
-        // We hit a wall, so move away from it.
-        away_vector -= direction;
-      }
-    }
-
-    if (away_vector.LengthSq() > 0.0f) {
-      ctx.bot->bot_controller->steering.Seek(*ctx.bot->game, self->position + Normalize(away_vector) * 10.0f);
-      return behavior::ExecuteResult::Success;
-    }
-
-    return behavior::ExecuteResult::Failure;
-  }
-
-  float search_distance = 0.0f;
-};
-
 std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::ExecuteContext& ctx) {
   using namespace behavior;
 
