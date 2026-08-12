@@ -124,6 +124,11 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   constexpr u32 kBurstFireDurationTicks = 30;   // ~0.3s of allowed fire
   constexpr u32 kBurstFireCooldownTicks = 100;  // ~1s forced pause after
 
+  // How long to keep pressing an advantage after the target loses energy (hit or spent shooting)
+  // while we still have more than they do - a sustained window instead of a single-tick reaction,
+  // since target_energy_prev only differs from target_energy for the one tick the drop happened.
+  constexpr u32 kPressAdvantageTicks = 300;  // ~3s
+
   constexpr float kAvoidTeamDistance = 6.0f;
 
   // How close a wall needs to be before we override movement to steer clear of it while fleeing.
@@ -383,10 +388,16 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                     .Child<BlackboardEraseNode>("recharge_timer") // remove recharge status as we're going in for the kill
                                     .Child<BlackboardEraseNode>("orbit_direction") // pick a fresh orbit direction next time we're back to circling
                                     .End()
-                                .Sequence() // Press the advantage if the target just lost energy (hit or spent shooting at us) and now has less than we do.
+                                .Sequence() // Press the advantage for a while after the target loses energy (hit or spent shooting) and now has meaningfully less than we do.
+                                    .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold) //dont commit to closing distance with no reps
+                                    .InvertChild<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance * 2.0f) //still needs to be a fight we're actually in, not clear across the map
                                     .Child<PlayerCurrentEnergyQueryNode>("self_energy")
-                                    .Child<LessThanNode<float>>("target_energy", "target_energy_prev")
-                                    .Child<GreaterThanNode<float>>("self_energy", "target_energy")
+                                    .Sequence(CompositeDecorator::Success) // (Re)arm the window on a fresh drop - it doesn't need to still be dropping for the window to hold.
+                                        .Child<LessThanNode<float>>("target_energy", "target_energy_prev")
+                                        .Child<GreaterThanNode<float>>("self_energy", "target_energy")
+                                        .Child<TimerSetNode>("press_advantage_until", kPressAdvantageTicks)
+                                        .End()
+                                    .InvertChild<TimerExpiredNode>("press_advantage_until") // still inside the window from a recent drop
                                     .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
                                     .Child<ScalarNode>(1.0f, "rushing")
                                     .Child<BlackboardEraseNode>("recharge_timer")
