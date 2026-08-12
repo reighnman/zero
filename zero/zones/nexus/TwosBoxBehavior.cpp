@@ -323,7 +323,7 @@ std::unique_ptr<behavior::BehaviorNode> TwosBoxBehavior::CreateTree(behavior::Ex
                         .InvertChild<TimerExpiredNode>("match_startup")
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
-                            .Child<FleeNode>("nearest_enemy_position", kLeashDistance)
+                            .Child<FleeNode>("nearest_enemy_position", kLeashDistance, 5.0f, 0.2f, "target_energy")
                             .End()
                         .End()
                     .Sequence()  //Keep enemy distance while reacharging
@@ -334,7 +334,7 @@ std::unique_ptr<behavior::BehaviorNode> TwosBoxBehavior::CreateTree(behavior::Ex
                         .Child<VectorSubtractNode>("nearest_enemy_position", "self_position", "target_direction", true)
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
-                            .Child<FleeNode>("nearest_aimshot", kLeashDistance)
+                            .Child<FleeNode>("nearest_aimshot", kLeashDistance, 5.0f, 0.2f, "target_energy")
                             .End()
                         .End()
                     .Sequence() // Path to target if they aren't immediately visible.

@@ -307,14 +307,14 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                         .InvertChild<TimerExpiredNode>("match_startup")
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
-                            .Child<FleeNode>("target_position", kLeashDistance)
+                            .Child<FleeNode>("target_position", kLeashDistance, 5.0f, 0.2f, "target_energy")
                             .End()
                         .End()
                     .Sequence()  //Keep enemy distance while reacharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
-                            .Child<FleeNode>("aimshot", kLeashDistance)
+                            .Child<FleeNode>("aimshot", kLeashDistance, 5.0f, 0.2f, "target_energy")
                             .End()
                         .End()
                     .Sequence() // Path to target if they aren't immediately visible.

@@ -39,19 +39,27 @@ namespace nexus {
 // how far past `target_distance` that goes. At that point this isn't a stall-for-recharge posture
 // anymore, it's a getaway - there's no "far enough" to settle for and hold broadside at when a
 // single hit could be fatal; every extra unit of distance is still worth having.
+//
+// `pressing_target_energy_key`, if given, names the energy of the target actually being pressed -
+// not necessarily the same player as `position_key`'s threat, since that may be the nearest enemy
+// rather than the one we're fighting. Still having more energy than that target overrides the
+// low-energy panic entirely: the fight itself is still winnable, so breaking off to run from a
+// closer, unrelated threat would be throwing away an advantage for no reason.
 struct FleeNode : public behavior::BehaviorNode {
   FleeNode(const char* position_key, float target_distance, float max_overshoot = 5.0f,
-           float low_energy_percent = 0.5f)
+           float low_energy_percent = 0.2f, const char* pressing_target_energy_key = nullptr)
       : position_key(position_key),
         target_distance(target_distance),
         max_overshoot(max_overshoot),
-        low_energy_percent(low_energy_percent) {}
+        low_energy_percent(low_energy_percent),
+        pressing_target_energy_key(pressing_target_energy_key) {}
   FleeNode(const char* position_key, const char* target_distance_key, float max_overshoot = 5.0f,
-           float low_energy_percent = 0.5f)
+           float low_energy_percent = 0.2f, const char* pressing_target_energy_key = nullptr)
       : position_key(position_key),
         target_distance_key(target_distance_key),
         max_overshoot(max_overshoot),
-        low_energy_percent(low_energy_percent) {}
+        low_energy_percent(low_energy_percent),
+        pressing_target_energy_key(pressing_target_energy_key) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -77,9 +85,18 @@ struct FleeNode : public behavior::BehaviorNode {
     float distance_sq = to_threat.LengthSq();
     float max_distance = distance + max_overshoot;
 
-    // Below this energy, there's no leash to settle for - just keep opening distance.
+    // Below this energy, there's no leash to settle for - just keep opening distance. Unless
+    // we're still ahead of the target we're actually pressing, in which case the fight is still
+    // worth finishing rather than breaking off for an unrelated nearby threat.
     float self_energy_percent = self->energy / (float)game.ship_controller.ship.energy;
-    bool panicking = self_energy_percent < low_energy_percent;
+    bool pressing_advantage = false;
+
+    if (pressing_target_energy_key) {
+      auto opt_target_energy = ctx.blackboard.Value<float>(pressing_target_energy_key);
+      pressing_advantage = opt_target_energy.has_value() && self->energy > *opt_target_energy;
+    }
+
+    bool panicking = !pressing_advantage && self_energy_percent < low_energy_percent;
 
     if (!panicking && distance_sq > max_distance * max_distance) {
       // Drifted past the leash margin on momentum alone - pull back in toward the standoff point
@@ -140,9 +157,10 @@ struct FleeNode : public behavior::BehaviorNode {
 
   const char* position_key = nullptr;
   const char* target_distance_key = nullptr;
+  const char* pressing_target_energy_key = nullptr;
   float target_distance = 0.0f;
   float max_overshoot = 5.0f;
-  float low_energy_percent = 0.5f;
+  float low_energy_percent = 0.2f;
 
  private:
   // Minimum backward-facing force to guarantee during active retreat, so Actuator can never read
