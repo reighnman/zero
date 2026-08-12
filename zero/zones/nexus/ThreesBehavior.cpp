@@ -30,6 +30,7 @@
 #include <zero/zones/nexus/nodes/ShotSpreadNode.h>
 #include <zero/zones/nexus/nodes/TargetAccelerationNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
+#include <zero/zones/nexus/nodes/BounceRayRectangleInterceptNode.h>
 #include <zero/zones/svs/nodes/BurstAreaQueryNode.h>
 #include <zero/zones/svs/nodes/DynamicPlayerBoundingBoxQueryNode.h>
 #include <zero/zones/svs/nodes/FindNearestGreenNode.h>
@@ -329,11 +330,24 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                             .End()
                         .End()
                     .Sequence() // Path to target if they aren't immediately visible.
-                        .Child<TimerExpiredNode>("match_startup") 
+                        .Child<TimerExpiredNode>("match_startup")
                         .InvertChild<VisibilityQueryNode>("target_position")
                         .Child<GoToNode>("target_position")
                         .Child<AvoidTeamNode>(kAvoidTeamDistance)
                         .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
+                        .Sequence(CompositeDecorator::Success) // Bounce a bullet off a wall to hit a target we can't see directly - bombs don't bounce, so this only applies to bullets.
+                            .Child<FaceNode>("aimshot")
+                            .Child<PlayerEnergyPercentThresholdNode>(0.35f)
+                            .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
+                            .InvertChild<TileQueryNode>(kTileIdSafe)
+                            .Child<ShotVelocityQueryNode>(WeaponType::Bullet, "bullet_fire_velocity")
+                            .Child<RayNode>("self_position", "bullet_fire_velocity", "bullet_fire_ray")
+                            .Child<BulletDistanceNode>("bullet_max_distance")
+                            .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
+                            .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
+                            .Child<BounceRayRectangleInterceptNode>("bullet_fire_ray", "target_bounds", "bullet_max_distance")
+                            .Child<InputActionNode>(InputAction::Bullet)
+                            .End()
                         .End()
                     .Sequence() // Aim at target and shoot while seeking them.
                         .Child<TimerExpiredNode>("match_startup") 
