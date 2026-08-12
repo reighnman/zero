@@ -28,6 +28,12 @@ namespace nexus {
 // when it crossed the leash distance keeps coasting outward. Past `target_distance +
 // max_overshoot`, pull back in toward the leash instead of just holding broadside, so residual
 // drift doesn't strand us too far from the fight to quickly re-engage.
+//
+// While actively retreating (not yet holding broadside), faces the threat instead of leaving
+// orientation to fall out of the retreat force. Ships thrust exactly as hard backward as forward,
+// so Actuator already picks Backward whenever the desired movement is behind current heading -
+// pointing the nose at the threat means retreating never costs a 180-degree turn or the aim that
+// comes with it, unlike leaving orientation to default to the movement direction.
 struct FleeNode : public behavior::BehaviorNode {
   FleeNode(const char* position_key, float target_distance, float max_overshoot = 5.0f)
       : position_key(position_key), target_distance(target_distance), max_overshoot(max_overshoot) {}
@@ -63,6 +69,7 @@ struct FleeNode : public behavior::BehaviorNode {
       // instead of continuing to hold broadside and coast further away.
       Vector2f standoff_point = threat_position + Normalize(self->position - threat_position) * distance;
 
+      steering.Face(game, threat_position);
       steering.Seek(game, standoff_point);
       steering.AvoidWalls(game);
 
@@ -81,7 +88,10 @@ struct FleeNode : public behavior::BehaviorNode {
     }
 
     // Same stand-off behavior as Seek, but blends in wall avoidance so retreating away from the
-    // target steers around walls instead of being driven straight into them.
+    // target steers around walls instead of being driven straight into them. Facing the threat
+    // while doing so means the retreat force ends up behind our heading, so Actuator backs us
+    // away with reverse thrust instead of turning around to face the retreat direction.
+    steering.Face(game, threat_position);
     steering.Seek(game, threat_position, distance);
     steering.AvoidWalls(game);
 
