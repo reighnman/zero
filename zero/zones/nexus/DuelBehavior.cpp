@@ -13,7 +13,6 @@
 #include <zero/behavior/nodes/PlayerNode.h>
 #include <zero/behavior/nodes/PowerballNode.h>
 #include <zero/behavior/nodes/RegionNode.h>
-#include <zero/behavior/nodes/RenderNode.h>
 #include <zero/behavior/nodes/ShipNode.h>
 #include <zero/behavior/nodes/ThreatNode.h>
 #include <zero/behavior/nodes/TimerNode.h>
@@ -321,7 +320,6 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                         .InvertChild<VisibilityQueryNode>("target_position")
                         .Child<GoToNode>("target_position")
                         .Child<AvoidTeamNode>(kAvoidTeamDistance)
-                        .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
                         .End()
                     .Sequence() // Aim at target and shoot while seeking them.
                         .Child<TimerExpiredNode>("match_startup") 
@@ -388,7 +386,6 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                                             .Child<DistanceThresholdNode>("nearest_teammate_position", kTeamRange) //If we're already near teammates dont run to them
                                             .Child<ScalarThresholdNode<float>>("target_energy", kLowEnergyThreshold)  //If we're going for a kill or someone is diving dont run
                                             .Child<GoToNode>("nearest_teammate_position")
-                                            .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
                                             .End()
                                         .Selector() // Close the gap while still far out, then circle instead of closing all the way to melee range.
                                             .Sequence()
@@ -421,8 +418,6 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray")
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", kBombProximityMultiplier) // lob range, not a precise hit
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
-                                .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
-                                .Child<RenderRayNode>("world_camera", "bomb_fire_ray", 50.0f, Vector3f(1.0f, 1.0f, 0.0f))
                                 .Child<RayRectangleInterceptNode>("bomb_fire_ray", "target_bounds")
                                 .Child<InputActionNode>(InputAction::Bomb)
                                 .End()
@@ -438,8 +433,6 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                                 .Child<RayNode>("self_position", "thor_fire_velocity", "thor_fire_ray")
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
-                                .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
-                                .Child<RenderRayNode>("world_camera", "thor_fire_ray", 50.0f, Vector3f(1.0f, 1.0f, 0.0f))
                                 .Child<RayRectangleInterceptNode>("thor_fire_ray", "target_bounds")
                                 .Child<InputActionNode>(InputAction::Thor) //Thor
                                 .End()
@@ -448,7 +441,6 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                                 .Child<TimerExpiredNode>("recharge_timer") 
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
-                                .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
                                 .Selector()
                                     .Child<BlackboardSetQueryNode>("rushing")
                                     // Bullets are cheap (~80 energy) - keeping a ~4 bullet reserve is plenty,
@@ -485,7 +477,6 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                     .Sequence()
                         .InvertChild<VisibilityQueryNode>("waypoint_position")
                         .Child<GoToNode>("waypoint_position")
-                        .Child<RenderPathNode>(Vector3f(0.0f, 0.5f, 1.0f))
                         .End()
                     .Parallel()
                         .Child<FaceNode>("waypoint_position")
