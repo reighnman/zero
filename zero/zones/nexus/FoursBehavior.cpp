@@ -25,6 +25,7 @@
 #include <zero/zones/nexus/nodes/NearestTeammateNode.h>
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/nexus/nodes/FleeNode.h>
+#include <zero/zones/nexus/nodes/OrbitNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
@@ -107,6 +108,21 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   constexpr float kTeamRange = 40.0f;
 
   constexpr float kLeashDistance = 30.0f;
+
+  // Once within this distance of the target, stop closing further and circle instead - close
+  // enough that they'll eventually fail to dodge a lobbed shot and we can dive in, far enough to
+  // have room to maneuver instead of colliding.
+  constexpr float kOrbitDistance = 15.0f;
+
+  // Bomb hitbox tolerance multiplier while orbiting - bigger than the bullet/thor multiplier below
+  // so bombs land as area denial off a near miss instead of needing a precise direct hit, like
+  // lobbing them into blast range instead of sniping with them.
+  constexpr float kBombProximityMultiplier = 8.0f;
+
+  // Fire bullets in short windows instead of spraying continuously while orbiting - a burst this
+  // long, then a forced pause this long before the next one. Bypassed entirely once rushing.
+  constexpr u32 kBurstFireDurationTicks = 30;   // ~0.3s of allowed fire
+  constexpr u32 kBurstFireCooldownTicks = 100;  // ~1s forced pause after
 
   constexpr float kAvoidTeamDistance = 6.0f;
 
@@ -365,6 +381,16 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                         .Child<TimerSetNode>("rocket_timer", 1500) // set a rocket cooldown period
                                         .End()
                                     .Child<BlackboardEraseNode>("recharge_timer") // remove recharge status as we're going in for the kill
+                                    .Child<BlackboardEraseNode>("orbit_direction") // pick a fresh orbit direction next time we're back to circling
+                                    .End()
+                                .Sequence() // Press the advantage if the target just lost energy (hit or spent shooting at us) and now has less than we do.
+                                    .Child<PlayerCurrentEnergyQueryNode>("self_energy")
+                                    .Child<LessThanNode<float>>("target_energy", "target_energy_prev")
+                                    .Child<GreaterThanNode<float>>("self_energy", "target_energy")
+                                    .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
+                                    .Child<ScalarNode>(1.0f, "rushing")
+                                    .Child<BlackboardEraseNode>("recharge_timer")
+                                    .Child<BlackboardEraseNode>("orbit_direction")
                                     .End()
                                 .Sequence()
                                     .Child<BlackboardSetQueryNode>("energy_disadvantaged")  // Set by EnergyDisadvantageNode above, relative to the target instead of a flat self-only threshold.
@@ -376,9 +402,15 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                         .Child<TimerSetNode>("decoy_timer", 850)
                                         .End()
                                     .End()
-                                .Sequence(CompositeDecorator::Success) 
-                                    .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Zero)
+                                .Sequence(CompositeDecorator::Success)
                                     .InvertChild<BlackboardSetQueryNode>("rushing")
+                                    .Selector() // Close the gap while still far out, then circle instead of closing all the way to melee range.
+                                        .Sequence()
+                                            .Child<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance)
+                                            .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Zero)
+                                            .End()
+                                        .Child<OrbitNode>("aimshot", kOrbitDistance, "orbit_direction")
+                                        .End()
                                     .Child<AvoidTeamNode>(kAvoidTeamDistance)
                                     .End()
                                 .End()
@@ -399,7 +431,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Child<DistanceThresholdNode>("nearest_target_position", 12.0f)  //dont pb yourself (dont use target here in case a teammate is on top)
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity") // check bomb velocity
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray") // check collision ray
-                                .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f) // check target hit box
+                                .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", kBombProximityMultiplier) // lob range, not a precise hit
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds") 
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
                                 .Child<RenderRayNode>("world_camera", "bomb_fire_ray", 50.0f, Vector3f(1.0f, 1.0f, 0.0f))
@@ -441,8 +473,18 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RayRectangleInterceptNode>("bullet_fire_ray", "target_bounds")
+                                .Selector() // Fire in short bursts instead of spraying continuously, unless committed to finishing a kill.
+                                    .Child<BlackboardSetQueryNode>("rushing")
+                                    .InvertChild<TimerExpiredNode>("burst_fire_until") // still inside an active burst window
+                                    .Sequence() // Pause between bursts is over - open a new window and let this shot through.
+                                        .Child<TimerExpiredNode>("burst_ready_at")
+                                        .Child<TimerSetNode>("burst_fire_until", kBurstFireDurationTicks)
+                                        .Child<TimerSetNode>("burst_ready_at", kBurstFireDurationTicks + kBurstFireCooldownTicks)
+                                        .End()
+                                    .End()
                                 .Child<InputActionNode>(InputAction::Bullet)
                                 .End()
+                            .Child<ScalarNode>("target_energy", "target_energy_prev") // snapshot for next tick's hit/spend detection above
                             .End()
                         .End()
                     .End()
