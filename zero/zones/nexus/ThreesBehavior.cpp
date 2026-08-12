@@ -24,6 +24,7 @@
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/nexus/nodes/NearestTeammateNode.h>
 #include <zero/zones/nexus/nodes/NearestTeammatePlayerPositionQueryNode.h>
+#include <zero/zones/nexus/nodes/OrbitNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
 #include <zero/zones/nexus/nodes/PredictiveAimNode.h>
 #include <zero/zones/nexus/nodes/ShotSpreadNode.h>
@@ -105,6 +106,26 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
   constexpr float kTeamRange = 40.0f;
 
   constexpr float kLeashDistance = 30.0f;
+
+  // Once within this distance of the target, stop closing further and circle instead - close
+  // enough that they'll eventually fail to dodge a lobbed shot and we can dive in, far enough to
+  // have room to maneuver instead of colliding.
+  constexpr float kOrbitDistance = 15.0f;
+
+  // Bomb hitbox tolerance multiplier while orbiting - bigger than the bullet/thor multiplier below
+  // so bombs land as area denial off a near miss instead of needing a precise direct hit, like
+  // lobbing them into blast range instead of sniping with them.
+  constexpr float kBombProximityMultiplier = 8.0f;
+
+  // Fire bullets in short windows instead of spraying continuously while orbiting - a burst this
+  // long, then a forced pause this long before the next one. Bypassed entirely once rushing.
+  constexpr u32 kBurstFireDurationTicks = 30;   // ~0.3s of allowed fire
+  constexpr u32 kBurstFireCooldownTicks = 100;  // ~1s forced pause after
+
+  // How long to keep pressing an advantage after the target loses energy (hit or spent shooting)
+  // while we still have more than they do - a sustained window instead of a single-tick reaction,
+  // since target_energy_prev only differs from target_energy for the one tick the drop happened.
+  constexpr u32 kPressAdvantageTicks = 300;  // ~3s
 
   constexpr float kAvoidTeamDistance = 6.0f;
 
@@ -372,6 +393,22 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                                         .Child<TimerSetNode>("rocket_timer", 1500)
                                         .End()
                                     .Child<BlackboardEraseNode>("recharge_timer")
+                                    .Child<BlackboardEraseNode>("orbit_direction") // pick a fresh orbit direction next time we're back to circling
+                                    .End()
+                                .Sequence() // Press the advantage for a while after the target loses energy (hit or spent shooting) and now has meaningfully less than we do.
+                                    .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold) //dont commit to closing distance with no reps
+                                    .InvertChild<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance * 2.0f) //still needs to be a fight we're actually in, not clear across the map
+                                    .Child<PlayerCurrentEnergyQueryNode>("self_energy")
+                                    .Sequence(CompositeDecorator::Success) // (Re)arm the window on a fresh drop - it doesn't need to still be dropping for the window to hold.
+                                        .Child<LessThanNode<float>>("target_energy", "target_energy_prev")
+                                        .Child<GreaterThanNode<float>>("self_energy", "target_energy")
+                                        .Child<TimerSetNode>("press_advantage_until", kPressAdvantageTicks)
+                                        .End()
+                                    .InvertChild<TimerExpiredNode>("press_advantage_until") // still inside the window from a recent drop
+                                    .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
+                                    .Child<ScalarNode>(1.0f, "rushing")
+                                    .Child<BlackboardEraseNode>("recharge_timer")
+                                    .Child<BlackboardEraseNode>("orbit_direction")
                                     .End()
                                 .Sequence()
                                     .Child<BlackboardSetQueryNode>("energy_disadvantaged")  // Set by EnergyDisadvantageNode above, relative to the target instead of a flat self-only threshold.
@@ -380,14 +417,19 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                                         .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Decoy)
                                         .Child<TimerExpiredNode>("decoy_timer")
                                         .Child<InputActionNode>(InputAction::Decoy)
-                                        .Child<TimerSetNode>("decoy_timer", 850)    
+                                        .Child<TimerSetNode>("decoy_timer", 850)
                                         .End()
                                     .End()
                                 .Sequence(CompositeDecorator::Success)
-                                    .Child<TimerExpiredNode>("match_startup") 
-                                    //.Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Zero)
-                                    .Child<SeekNode>("aimshot", 15.0f, SeekNode::DistanceResolveType::Dynamic)
+                                    .Child<TimerExpiredNode>("match_startup")
                                     .InvertChild<BlackboardSetQueryNode>("rushing")
+                                    .Selector() // Close the gap while still far out, then circle instead of closing all the way to melee range.
+                                        .Sequence()
+                                            .Child<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance)
+                                            .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Zero)
+                                            .End()
+                                        .Child<OrbitNode>("aimshot", kOrbitDistance, "orbit_direction")
+                                        .End()
                                     .Child<AvoidTeamNode>(kAvoidTeamDistance)
                                     .End()
                                 .End()
@@ -409,7 +451,7 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                                 .Child<DistanceThresholdNode>("target_position", "target_nearest_teammate_position", 12.0f)  //dont bomb at our target if we or a teammate is near them
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity")
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray")
-                                .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
+                                .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", kBombProximityMultiplier) // lob range, not a precise hit
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
                                 .Child<RenderRayNode>("world_camera", "bomb_fire_ray", 50.0f, Vector3f(1.0f, 1.0f, 0.0f))
@@ -452,8 +494,18 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RayRectangleInterceptNode>("bullet_fire_ray", "target_bounds")
+                                .Selector() // Fire in short bursts instead of spraying continuously, unless committed to finishing a kill.
+                                    .Child<BlackboardSetQueryNode>("rushing")
+                                    .InvertChild<TimerExpiredNode>("burst_fire_until") // still inside an active burst window
+                                    .Sequence() // Pause between bursts is over - open a new window and let this shot through.
+                                        .Child<TimerExpiredNode>("burst_ready_at")
+                                        .Child<TimerSetNode>("burst_fire_until", kBurstFireDurationTicks)
+                                        .Child<TimerSetNode>("burst_ready_at", kBurstFireDurationTicks + kBurstFireCooldownTicks)
+                                        .End()
+                                    .End()
                                 .Child<InputActionNode>(InputAction::Bullet)
                                 .End()
+                            .Child<ScalarNode>("target_energy", "target_energy_prev") // snapshot for next tick's hit/spend detection above
                             .End()
                         .End()
                     .End()
