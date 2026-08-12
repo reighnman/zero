@@ -245,7 +245,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                         .InvertChild<TimerExpiredNode>("recharge_timer")
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
-                            .Child<FleeNode>("aimshot", kLeashDistance)
+                            .Child<FleeNode>("nearest_aimshot", kLeashDistance)
                             .End()
                         .End()
                     .Sequence() // Path to target if they aren't immediately visible.
