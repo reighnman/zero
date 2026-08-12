@@ -23,6 +23,7 @@
 #include <zero/zones/svs/nodes/MemoryTargetNode.h>
 #include <zero/zones/svs/nodes/NearbyEnemyWeaponQueryNode.h>
 #include <zero/zones/nexus/nodes/NearestTeammateNode.h>
+#include <zero/zones/nexus/nodes/NearestTeammatePlayerPositionQueryNode.h>
 #include <zero/zones/nexus/nodes/EnergyDisadvantageNode.h>
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/nexus/nodes/OrbitNode.h>
@@ -447,6 +448,8 @@ std::unique_ptr<behavior::BehaviorNode> TwosBoxBehavior::CreateTree(behavior::Ex
                                 .Child<ScalarThresholdNode<float>>("outgoing_damage", kBombRequiredDamageOverlap) // Check if we have enough bullets overlapping outgoing damage to fire a bomb into.
                                 .InvertChild<DistanceThresholdNode>("target_position", 50.0f)  //dont bomb from too far
                                 .Child<DistanceThresholdNode>("nearest_enemy_position", 12.0f)  //check to ensure no enemies are on top of us
+                                .Child<NearestTeammatePlayerPositionQueryNode>("target", "target_nearest_teammate_position")
+                                .Child<DistanceThresholdNode>("target_position", "target_nearest_teammate_position", 12.0f)  //dont bomb at our target if we or a teammate is near them
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity")
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray")
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", kBombProximityMultiplier) // lob range, not a precise hit
