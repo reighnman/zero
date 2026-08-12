@@ -345,16 +345,6 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                             .Child<FleeNode>("aimshot", kLeashDistance)
                             .End()
                         .End()
-                    .Sequence() // Path to teammate if far away
-                        .Child<TimerExpiredNode>("match_startup") 
-                        .InvertChild<BlackboardSetQueryNode>("rushing")
-                        .Child<NearestTeammateNode>("nearest_teammate", 2) //Make sure we have at least 1 teammate close, if more than one stay with the broader group
-                        .Child<PlayerPositionQueryNode>("nearest_teammate", "nearest_teammate_position")
-                        .Child<DistanceThresholdNode>("nearest_teammate_position", kTeamRange) //If we're already near teammates dont run to them
-                        .Child<ScalarThresholdNode<float>>("target_energy", kLowEnergyThreshold)  //If we're going for a kill or someone is diving dont run
-                        .Child<GoToNode>("nearest_teammate_position")
-                        .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
-                        .End()
                     .Sequence() // Path to target if they aren't immediately visible.
                         .Child<TimerExpiredNode>("match_startup") 
                         .InvertChild<VisibilityQueryNode>("target_position")
@@ -423,12 +413,22 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                                 .Sequence(CompositeDecorator::Success)
                                     .Child<TimerExpiredNode>("match_startup")
                                     .InvertChild<BlackboardSetQueryNode>("rushing")
-                                    .Selector() // Close the gap while still far out, then circle instead of closing all the way to melee range.
-                                        .Sequence()
-                                            .Child<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance)
-                                            .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Zero)
+                                    .Selector()
+                                        .Sequence() // Path to teammate if far away - still faces/fires/juke-dodges via this Parallel instead of running blind.
+                                            .Child<NearestTeammateNode>("nearest_teammate", 2) //Make sure we have at least 1 teammate close, if more than one stay with the broader group
+                                            .Child<PlayerPositionQueryNode>("nearest_teammate", "nearest_teammate_position")
+                                            .Child<DistanceThresholdNode>("nearest_teammate_position", kTeamRange) //If we're already near teammates dont run to them
+                                            .Child<ScalarThresholdNode<float>>("target_energy", kLowEnergyThreshold)  //If we're going for a kill or someone is diving dont run
+                                            .Child<GoToNode>("nearest_teammate_position")
+                                            .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
                                             .End()
-                                        .Child<OrbitNode>("aimshot", kOrbitDistance, "orbit_direction")
+                                        .Selector() // Close the gap while still far out, then circle instead of closing all the way to melee range.
+                                            .Sequence()
+                                                .Child<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance)
+                                                .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Zero)
+                                                .End()
+                                            .Child<OrbitNode>("aimshot", kOrbitDistance, "orbit_direction")
+                                            .End()
                                         .End()
                                     .Child<AvoidTeamNode>(kAvoidTeamDistance)
                                     .End()
