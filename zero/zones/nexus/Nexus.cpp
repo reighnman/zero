@@ -4,8 +4,6 @@
 #include <zero/game/GameEvent.h>
 #include <zero/game/Logger.h>
 #include <zero/zones/ZoneController.h>
-#include <zero/zones/nexus/PubOffenseBehavior.h>
-#include <zero/zones/nexus/PubCoverBehavior.h>
 #include <zero/zones/nexus/TestBehavior.h>
 #include <zero/zones/nexus/DuelBehavior.h>
 #include <zero/zones/nexus/TwosBehavior.h>
@@ -103,17 +101,14 @@ void NexusController::CreateBehaviors(const char* arena_name) {
 
   auto& repo = bot->bot_controller->behaviors;
 
-  repo.Add("puboffense", std::make_unique<PubOffenseBehavior>());
-  repo.Add("pubcover", std::make_unique<PubCoverBehavior>());
   repo.Add("duel", std::make_unique<DuelBehavior>());
   repo.Add("twos", std::make_unique<TwosBehavior>());
   repo.Add("threes", std::make_unique<ThreesBehavior>());
   repo.Add("fours", std::make_unique<FoursBehavior>());
   repo.Add("twosbox", std::make_unique<TwosBoxBehavior>());
   repo.Add("test", std::make_unique<TestBehavior>());
-  
 
-  SetBehavior("puboffense");
+  SetBehavior("duel");
 }
 
 }  // namespace nexus
