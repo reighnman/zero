@@ -23,11 +23,16 @@ namespace nexus {
 // already perpendicular to the threat; reactively dodging from a face-on orientation costs a
 // rotation before any real lateral velocity builds up. Facing broadside in advance means
 // DodgeIncomingDamage can convert straight into forward/backward thrust the instant it's needed.
+//
+// Holding broadside doesn't cancel momentum though, so a ship that was still accelerating away
+// when it crossed the leash distance keeps coasting outward. Past `target_distance +
+// max_overshoot`, pull back in toward the leash instead of just holding broadside, so residual
+// drift doesn't strand us too far from the fight to quickly re-engage.
 struct FleeNode : public behavior::BehaviorNode {
-  FleeNode(const char* position_key, float target_distance)
-      : position_key(position_key), target_distance(target_distance) {}
-  FleeNode(const char* position_key, const char* target_distance_key)
-      : position_key(position_key), target_distance_key(target_distance_key) {}
+  FleeNode(const char* position_key, float target_distance, float max_overshoot = 5.0f)
+      : position_key(position_key), target_distance(target_distance), max_overshoot(max_overshoot) {}
+  FleeNode(const char* position_key, const char* target_distance_key, float max_overshoot = 5.0f)
+      : position_key(position_key), target_distance_key(target_distance_key), max_overshoot(max_overshoot) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -50,9 +55,22 @@ struct FleeNode : public behavior::BehaviorNode {
     auto& steering = ctx.bot->bot_controller->steering;
 
     Vector2f to_threat = threat_position - self->position;
+    float distance_sq = to_threat.LengthSq();
+    float max_distance = distance + max_overshoot;
 
-    if (to_threat.LengthSq() > distance * distance) {
-      // Already far enough away — hold here broadside instead of continuing to move, so we're
+    if (distance_sq > max_distance * max_distance) {
+      // Drifted past the leash margin on momentum alone - pull back in toward the standoff point
+      // instead of continuing to hold broadside and coast further away.
+      Vector2f standoff_point = threat_position + Normalize(self->position - threat_position) * distance;
+
+      steering.Seek(game, standoff_point);
+      steering.AvoidWalls(game);
+
+      return behavior::ExecuteResult::Success;
+    }
+
+    if (distance_sq > distance * distance) {
+      // Within the leash margin — hold here broadside instead of continuing to move, so we're
       // ready to dodge along this axis the instant it's needed.
       Vector2f broadside_direction = GetBroadsideDirection(*self, threat_position);
 
@@ -73,6 +91,7 @@ struct FleeNode : public behavior::BehaviorNode {
   const char* position_key = nullptr;
   const char* target_distance_key = nullptr;
   float target_distance = 0.0f;
+  float max_overshoot = 5.0f;
 
  private:
   // Returns whichever perpendicular-to-threat heading is closer to our current facing, so turning
