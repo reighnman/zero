@@ -27,6 +27,7 @@
 #include <zero/zones/nexus/nodes/EnergyDisadvantageNode.h>
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/nexus/nodes/OrbitNode.h>
+#include <zero/zones/nexus/nodes/BroadsideFaceNode.h>
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
 #include <zero/zones/nexus/nodes/FleeNode.h>
@@ -259,8 +260,16 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                             .Child<DistanceThresholdNode>("target_position", kShotSpreadDistanceThreshold)
                             .Child<ShotSpreadNode>("aimshot", 3.0f, 1.0f, "target_acceleration", kShotSpreadManeuveringNormalizer)
                             .End()
-                        .Parallel()     
-                            .Child<FaceNode>("aimshot")
+                        .Parallel()
+                            .Selector() // Face the target to line up a shot, or broadside between volleys while orbiting to stay dodge-ready.
+                                .Sequence()
+                                    .InvertChild<BlackboardSetQueryNode>("rushing") // not pressing
+                                    .InvertChild<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance) // actually orbiting, not still closing
+                                    .Child<TimerExpiredNode>("burst_fire_until") // between volleys, not mid-burst
+                                    .Child<BroadsideFaceNode>("target_position")
+                                    .End()
+                                .Child<FaceNode>("aimshot")
+                                .End()
                             .Child<BlackboardEraseNode>("rushing")
                             .Selector()
                                .Sequence() // If there is any low target with in this range prioritize

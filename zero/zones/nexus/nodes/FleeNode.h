@@ -5,6 +5,7 @@
 #include <zero/behavior/BehaviorTree.h>
 #include <zero/game/Game.h>
 #include <zero/game/Logger.h>
+#include <zero/zones/nexus/nodes/BroadsideFaceNode.h>
 
 namespace zero {
 namespace nexus {
@@ -166,21 +167,6 @@ struct FleeNode : public behavior::BehaviorNode {
   // Minimum backward-facing force to guarantee during active retreat, so Actuator can never read
   // the combined steering.force as pointing toward the threat once Seek's own contribution decays.
   static constexpr float kMinRetreatForce = 1.0f;
-
-  // Returns whichever perpendicular-to-threat heading is closer to our current facing, so turning
-  // to face it costs the smaller rotation. Either direction along that axis is equally useful for
-  // a forward/backward dodge, since Actuator already picks whichever of forward/backward thrust
-  // requires less rotation to reach.
-  static Vector2f GetBroadsideDirection(const Player& self, const Vector2f& threat_position) {
-    Vector2f away_direction = Normalize(self.position - threat_position);
-    Vector2f broadside = Perpendicular(away_direction);
-
-    if (broadside.Dot(self.GetHeading()) < 0.0f) {
-      broadside = -broadside;
-    }
-
-    return broadside;
-  }
 };
 
 }  // namespace nexus

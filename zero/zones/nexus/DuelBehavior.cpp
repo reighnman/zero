@@ -22,6 +22,7 @@
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/nexus/nodes/NearestTeammateNode.h>
 #include <zero/zones/nexus/nodes/OrbitNode.h>
+#include <zero/zones/nexus/nodes/BroadsideFaceNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
@@ -328,7 +329,15 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                             .Child<ShotSpreadNode>("aimshot", 3.0f, 1.0f, "target_acceleration", kShotSpreadManeuveringNormalizer)
                             .End()
                         .Parallel()
-                            .Child<FaceNode>("aimshot")
+                            .Selector() // Face the target to line up a shot, or broadside between volleys while orbiting to stay dodge-ready.
+                                .Sequence()
+                                    .InvertChild<BlackboardSetQueryNode>("rushing") // not pressing
+                                    .InvertChild<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance) // actually orbiting, not still closing
+                                    .Child<TimerExpiredNode>("burst_fire_until") // between volleys, not mid-burst
+                                    .Child<BroadsideFaceNode>("target_position")
+                                    .End()
+                                .Child<FaceNode>("aimshot")
+                                .End()
                             .Child<BlackboardEraseNode>("rushing")
                             .Sequence(CompositeDecorator::Success) // Juke away from moderate incoming threats without breaking aim off the target.
                                 .Child<DodgeJukeNode>(30.0f)
