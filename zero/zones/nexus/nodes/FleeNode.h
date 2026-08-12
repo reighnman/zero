@@ -34,11 +34,24 @@ namespace nexus {
 // so Actuator already picks Backward whenever the desired movement is behind current heading -
 // pointing the nose at the threat means retreating never costs a 180-degree turn or the aim that
 // comes with it, unlike leaving orientation to default to the movement direction.
+//
+// Below `low_energy_percent`, skips the leash altogether and keeps actively retreating no matter
+// how far past `target_distance` that goes. At that point this isn't a stall-for-recharge posture
+// anymore, it's a getaway - there's no "far enough" to settle for and hold broadside at when a
+// single hit could be fatal; every extra unit of distance is still worth having.
 struct FleeNode : public behavior::BehaviorNode {
-  FleeNode(const char* position_key, float target_distance, float max_overshoot = 5.0f)
-      : position_key(position_key), target_distance(target_distance), max_overshoot(max_overshoot) {}
-  FleeNode(const char* position_key, const char* target_distance_key, float max_overshoot = 5.0f)
-      : position_key(position_key), target_distance_key(target_distance_key), max_overshoot(max_overshoot) {}
+  FleeNode(const char* position_key, float target_distance, float max_overshoot = 5.0f,
+           float low_energy_percent = 0.5f)
+      : position_key(position_key),
+        target_distance(target_distance),
+        max_overshoot(max_overshoot),
+        low_energy_percent(low_energy_percent) {}
+  FleeNode(const char* position_key, const char* target_distance_key, float max_overshoot = 5.0f,
+           float low_energy_percent = 0.5f)
+      : position_key(position_key),
+        target_distance_key(target_distance_key),
+        max_overshoot(max_overshoot),
+        low_energy_percent(low_energy_percent) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -64,7 +77,11 @@ struct FleeNode : public behavior::BehaviorNode {
     float distance_sq = to_threat.LengthSq();
     float max_distance = distance + max_overshoot;
 
-    if (distance_sq > max_distance * max_distance) {
+    // Below this energy, there's no leash to settle for - just keep opening distance.
+    float self_energy_percent = self->energy / (float)game.ship_controller.ship.energy;
+    bool panicking = self_energy_percent < low_energy_percent;
+
+    if (!panicking && distance_sq > max_distance * max_distance) {
       // Drifted past the leash margin on momentum alone - pull back in toward the standoff point
       // instead of continuing to hold broadside and coast further away.
       Vector2f standoff_point = threat_position + Normalize(self->position - threat_position) * distance;
@@ -76,7 +93,7 @@ struct FleeNode : public behavior::BehaviorNode {
       return behavior::ExecuteResult::Success;
     }
 
-    if (distance_sq > distance * distance) {
+    if (!panicking && distance_sq > distance * distance) {
       // Within the leash margin — hold here broadside instead of continuing to move, so we're
       // ready to dodge along this axis the instant it's needed.
       Vector2f broadside_direction = GetBroadsideDirection(*self, threat_position);
@@ -92,7 +109,17 @@ struct FleeNode : public behavior::BehaviorNode {
     // while doing so means the retreat force ends up behind our heading, so Actuator backs us
     // away with reverse thrust instead of turning around to face the retreat direction.
     steering.Face(game, threat_position);
-    steering.Seek(game, threat_position, distance);
+
+    if (panicking) {
+      // Seek's 3-arg overload switches to closing back in once past `distance`, which is exactly
+      // wrong while panicking - seek an away point instead, so it keeps opening distance no matter
+      // how far out that goes.
+      Vector2f away_direction = Normalize(self->position - threat_position);
+      steering.Seek(game, self->position + away_direction * 1000.0f);
+    } else {
+      steering.Seek(game, threat_position, distance);
+    }
+
     steering.AvoidWalls(game);
 
     // steering.force is a single accumulator shared by every node that runs this tick, and nodes
@@ -115,6 +142,7 @@ struct FleeNode : public behavior::BehaviorNode {
   const char* target_distance_key = nullptr;
   float target_distance = 0.0f;
   float max_overshoot = 5.0f;
+  float low_energy_percent = 0.5f;
 
  private:
   // Minimum backward-facing force to guarantee during active retreat, so Actuator can never read
