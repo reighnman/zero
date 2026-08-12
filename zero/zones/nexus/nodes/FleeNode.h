@@ -95,6 +95,19 @@ struct FleeNode : public behavior::BehaviorNode {
     steering.Seek(game, threat_position, distance);
     steering.AvoidWalls(game);
 
+    // steering.force is a single accumulator shared by every node that runs this tick, and nodes
+    // earlier in the tree (DodgeIncomingDamage's minor nudge, in particular) blend into it whether
+    // or not they're the reason movement is happening. Seek's own contribution above shrinks toward
+    // zero once already cruising at retreat speed, which can be most of an active retreat - once it
+    // does, a small unrelated nudge is free to decide the sign of the combined force on its own.
+    // Actuator picks Forward whenever that combined force reads as ahead of heading, which here
+    // means thrusting into the threat instead of away from it. Clamp the heading-aligned component
+    // so this branch's "away" guarantee holds regardless of what else added to force this tick.
+    float heading_component = steering.force.Dot(self->GetHeading());
+    if (heading_component > -kMinRetreatForce) {
+      steering.force -= self->GetHeading() * (heading_component + kMinRetreatForce);
+    }
+
     return behavior::ExecuteResult::Success;
   }
 
@@ -104,6 +117,10 @@ struct FleeNode : public behavior::BehaviorNode {
   float max_overshoot = 5.0f;
 
  private:
+  // Minimum backward-facing force to guarantee during active retreat, so Actuator can never read
+  // the combined steering.force as pointing toward the threat once Seek's own contribution decays.
+  static constexpr float kMinRetreatForce = 1.0f;
+
   // Returns whichever perpendicular-to-threat heading is closer to our current facing, so turning
   // to face it costs the smaller rotation. Either direction along that axis is equally useful for
   // a forward/backward dodge, since Actuator already picks whichever of forward/backward thrust
