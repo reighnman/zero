@@ -23,6 +23,7 @@
 #include <zero/zones/nexus/nodes/NearestTeammateNode.h>
 #include <zero/zones/nexus/nodes/OrbitNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
+#include <zero/zones/nexus/nodes/BounceRayRectangleInterceptNode.h>
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
 #include <zero/zones/nexus/nodes/EnergyDisadvantageNode.h>
@@ -320,6 +321,20 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                         .InvertChild<VisibilityQueryNode>("target_position")
                         .Child<GoToNode>("target_position")
                         .Child<AvoidTeamNode>(kAvoidTeamDistance)
+                        .Sequence(CompositeDecorator::Success) // Bounce a bullet off a wall to hit a target we can't see directly - bombs don't bounce, so this only applies to bullets.
+                            .Child<TimerExpiredNode>("match_startup")
+                            .Child<FaceNode>("aimshot")
+                            .Child<PlayerEnergyPercentThresholdNode>(kReferenceBulletCost * 4.0f / kReferenceMaxEnergy)  // ~0.19
+                            .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
+                            .InvertChild<TileQueryNode>(kTileIdSafe)
+                            .Child<ShotVelocityQueryNode>(WeaponType::Bullet, "bullet_fire_velocity")
+                            .Child<RayNode>("self_position", "bullet_fire_velocity", "bullet_fire_ray")
+                            .Child<BulletDistanceNode>("bullet_max_distance")
+                            .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
+                            .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
+                            .Child<BounceRayRectangleInterceptNode>("bullet_fire_ray", "target_bounds", "bullet_max_distance")
+                            .Child<InputActionNode>(InputAction::Bullet)
+                            .End()
                         .End()
                     .Sequence() // Aim at target and shoot while seeking them.
                         .Child<TimerExpiredNode>("match_startup") 
