@@ -95,10 +95,6 @@
     <ClCompile Include="zero\zones\hockey\HockeyZone.cpp" />
     <ClCompile Include="zero\zones\hockey\OffenseBehavior.cpp" />
     <ClCompile Include="zero\zones\nexus\FoursBehavior.cpp" />
-    <ClCompile Include="zero\zones\nexus\FoursBehaviorV2.cpp" />
-    <ClCompile Include="zero\zones\nexus\NexusTeamBehaviorV2.cpp" />
-    <ClCompile Include="zero\zones\nexus\ThreesBehaviorV2.cpp" />
-    <ClCompile Include="zero\zones\nexus\TwosBehaviorV2.cpp" />
     <ClCompile Include="zero\zones\nexus\TwosBoxBehavior.cpp" />
     <ClCompile Include="zero\zones\nexus\TwosBehavior.cpp" />
     <ClCompile Include="zero\zones\nexus\DuelBehavior.cpp" />
@@ -251,11 +247,6 @@
     <ClInclude Include="zero\zones\hockey\nodes\RinkNode.h" />
     <ClInclude Include="zero\zones\hockey\OffenseBehavior.h" />
     <ClInclude Include="zero\zones\nexus\FoursBehavior.h" />
-    <ClInclude Include="zero\zones\nexus\FoursBehaviorV2.h" />
-    <ClInclude Include="zero\zones\nexus\NexusTeamBehaviorV2.h" />
-    <ClInclude Include="zero\zones\nexus\NexusTeamConfigV2.h" />
-    <ClInclude Include="zero\zones\nexus\ThreesBehaviorV2.h" />
-    <ClInclude Include="zero\zones\nexus\TwosBehaviorV2.h" />
     <ClInclude Include="zero\zones\nexus\LivesTracker.h" />
     <ClInclude Include="zero\zones\nexus\nodes\EnclosureQuery.h" />
     <ClInclude Include="zero\zones\nexus\nodes\EngagementPhaseNode.h" />

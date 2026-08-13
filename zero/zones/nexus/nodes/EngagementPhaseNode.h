@@ -28,8 +28,10 @@ enum class EngagementPhase {
 
 // Classifies the current tick into one EngagementPhase and writes it to `phase_key`.
 //
-// Every threshold here comes from ZeroReplayAnalyzer (see FoursBehaviorV2.cpp) run against 21 real
-// 4v4 SVS league replays:
+// Every threshold here comes from ZeroReplayAnalyzer run against 21 real 4v4 SVS league replays.
+// The tree that consumed this node (NexusTeamBehaviorV2.cpp, behind foursv2/threesv2/twosv2) played
+// worse than the V1 behaviors and was removed; the node is kept for future use. See git history for
+// the removed tree and its per-mode config:
 //   - Finish: the player who actually got killed was, at the moment of death, at a median of just
 //     10% of their own max energy (p75 20%), and the killer-to-target distance at that moment had
 //     a median of ~11 units. `finish_target_percent`/`finish_distance` recognize that exact
