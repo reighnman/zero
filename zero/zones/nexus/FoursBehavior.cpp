@@ -23,12 +23,12 @@
 #include <zero/zones/svs/nodes/MemoryTargetNode.h>
 #include <zero/zones/svs/nodes/NearbyEnemyWeaponQueryNode.h>
 #include <zero/zones/nexus/nodes/NearestTeammateNode.h>
-#include <zero/zones/nexus/nodes/NearestTeammatePlayerPositionQueryNode.h>
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/nexus/nodes/FleeNode.h>
 #include <zero/zones/nexus/nodes/OrbitNode.h>
 #include <zero/zones/nexus/nodes/LocalAdvantageNode.h>
 #include <zero/zones/nexus/nodes/EngagementRangeNode.h>
+#include <zero/zones/nexus/nodes/BombBlastSafetyNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
@@ -107,6 +107,20 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // How much damage that is going towards an enemy before we start bombing. This is to limit the frequency of our
   // bombing so it overlaps bullets and is harder to dodge.
   constexpr float kBombRequiredDamageOverlap = 300.0f;
+
+  // Extra clearance beyond the bomb's actual blast radius before we're willing to fire one, since
+  // both we and the teammate keep moving during the bomb's flight and the detonation point is only
+  // ever an estimate. With a typical BombExplodePixels this lands the effective keep-out at roughly
+  // the 12 tiles the old (single-friendly) check used, while now applying to every teammate and to
+  // early detonations along the flight path rather than to one player at the target.
+  //
+  // Humans are far more conservative than even this: their 25th-percentile distance from the target
+  // to their own nearest teammate when bombing is 24 tiles, against 17 for the bot. This margin is
+  // deliberately not raised to match, because much of that human gap is just teammates being spread
+  // out rather than a deliberate hold - what the corpus actually shows them doing is *discriminating
+  // by weapon*, firing bombs into an occupied lane less often than bullets, which is the behavior
+  // this gate restores.
+  constexpr float kBombFriendlyBlastMargin = 6.0f;
 
   // How far away a target needs to be before we start varying our shots around the target.
   constexpr float kShotSpreadDistanceThreshold = 40.0f;
@@ -469,8 +483,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Child<ScalarThresholdNode<float>>("outgoing_damage", kBombRequiredDamageOverlap) // Check if we have enough bullets overlapping outgoing damage to fire a bomb into.
                                 .InvertChild<DistanceThresholdNode>("nearest_target_position", 50.0f)  //dont bomb from too far
                                 .Child<DistanceThresholdNode>("nearest_target_position", 12.0f)  //dont pb yourself (dont use target here in case a teammate is on top)
-                                .Child<NearestTeammatePlayerPositionQueryNode>("target", "target_nearest_teammate_position")
-                                .Child<DistanceThresholdNode>("target_position", "target_nearest_teammate_position", 12.0f)  //dont bomb at our target if we or a teammate is near them
+                                .Child<BombBlastSafetyNode>("aimshot", kBombFriendlyBlastMargin)  //never bomb when the blast would catch us or a teammate - fall through to bullets instead
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity") // check bomb velocity
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray") // check collision ray
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", kBombProximityMultiplier) // lob range, not a precise hit
