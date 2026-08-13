@@ -31,6 +31,9 @@
 #include <zero/zones/nexus/nodes/BombBlastSafetyNode.h>
 #include <zero/zones/nexus/nodes/TeamCentroidNode.h>
 #include <zero/zones/nexus/nodes/IncomingBlastDamageNode.h>
+#include <zero/zones/nexus/nodes/RocketUsageNode.h>
+#include <zero/zones/nexus/nodes/MineAvailableNode.h>
+#include <zero/zones/nexus/nodes/EnemiesNearTargetNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
@@ -137,6 +140,36 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // outright: BombBlastSafetyNode already keeps us outside our own blast using the real
   // BombExplodePixels radius, which is what that number was standing in for.
   constexpr float kBombMinForwardVelocity = 0.0f;
+
+  // --- Rockets ---
+  // A rocket is a short burst of extra thrust and a raised speed cap. It only converts into real
+  // distance if we're already near our normal top speed - lit from slow, most of the burn is spent
+  // reaching a speed we'd have reached anyway, and while chasing it also risks sailing straight past
+  // the target. So both uses below require us to already be moving.
+  constexpr float kRocketMinSpeedPercent = 0.8f;
+  // Chasing: only worth it if there's real ground to make up. Inside this we'd overshoot.
+  constexpr float kRocketChaseMinDistance = 12.0f;
+  constexpr float kRocketChaseMaxDistance = 35.0f;
+  // Escaping: light it when whoever is chasing us is this close and still coming.
+  constexpr float kRocketEscapeDistance = 18.0f;
+
+  // --- Mines ---
+  // Measured off the human in the bot-vs-human replays: he laid exactly one mine per match, both
+  // times at 5-12% energy with a pursuer ~10 tiles back while running at ~20 tiles/sec with nearly
+  // all of that speed pointed straight away. It's an escape tool - dropped to make a chaser break
+  // off - not an area-denial one. Too close and we're still inside our own blast when it goes off;
+  // too far and they simply steer around it.
+  constexpr float kMineMinPursuerDistance = 7.0f;
+  constexpr float kMineMaxPursuerDistance = 16.0f;
+
+  // --- Multifire ---
+  // Multifire fans the shot instead of firing a single line: more energy per trigger, worse against
+  // one target, better when several are bunched and a spread can catch more than one. Enemies
+  // within this radius of the target count as a cluster worth fanning into.
+  constexpr float kMultifireClusterRadius = 5.0f;
+  constexpr float kMultifireMinEnemies = 2.0f;
+  // Don't pay the extra cost per shot while we're short on energy.
+  constexpr float kMultifireMinEnergyPercent = 0.5f;
 
   // Don't take bullet shots past this. Two things made long-range fire actively wasteful rather
   // than merely low-value: the aim solver was under-leading (fixed in PredictiveAimNode), and
@@ -345,18 +378,21 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                     .InvertChild<ShipPortalPositionQueryNode>()
                     .Child<InputActionNode>(InputAction::Portal)
                     .End()
-                .Selector(CompositeDecorator::Success) // Enable multifire if ship supports it and it's disabled.
-                    .Sequence()
+                .Selector(CompositeDecorator::Success) // Multifire covers ground rather than a point, so run it only when a spread can catch more than one enemy.
+                    .Sequence() // Turn it on for a cluster we can afford to fan into.
                         .Child<ShipCapabilityQueryNode>(ShipCapability_Multifire)
-                        .Child<DistanceThresholdNode>("target_position", 35.0f) // If we are far from enemy, use multifire
+                        .Child<ScalarThresholdNode<float>>("enemies_near_target", kMultifireMinEnemies)
+                        .Child<PlayerEnergyPercentThresholdNode>(kMultifireMinEnergyPercent)
                         .InvertChild<ShipMultifireQueryNode>()  //Check if multifire is off
-                        .InvertChild<BlackboardSetQueryNode>("rushing") //dont multi if rushing
                         .Child<InputActionNode>(InputAction::Multifire) //Turn on multifire
                         .End()
-                    .Sequence()
+                    .Sequence() // Turn it back off for a lone target, or once we can't afford the per-shot premium.
                         .Child<ShipCapabilityQueryNode>(ShipCapability_Multifire)
-                        .InvertChild<DistanceThresholdNode>("target_position", 35.0f) // If we are far from enemy, turn off multifire
                         .Child<ShipMultifireQueryNode>()  //Check if multifire is on
+                        .Selector()
+                            .InvertChild<ScalarThresholdNode<float>>("enemies_near_target", kMultifireMinEnemies)
+                            .InvertChild<PlayerEnergyPercentThresholdNode>(kMultifireMinEnergyPercent)
+                            .End()
                         .Child<InputActionNode>(InputAction::Multifire)  //Turn off multifire
                         .End()
                     .End()
@@ -378,6 +414,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                 .Sequence(CompositeDecorator::Success) // Work out how close we should be fighting right now: the exchange favors closing hard at parity or better, and backing off while outnumbered.
                     .Child<LocalAdvantageNode>(kLocalAdvantageRadius, "local_advantage")
                     .Child<EngagementRangeNode>("local_advantage", "engagement_range", kOrbitDistance, kOutnumberedDistance, kPumpAmplitude, kPumpHalfPeriodTicks)
+                    .Child<EnemiesNearTargetNode>("target", kMultifireClusterRadius, "enemies_near_target") //Drives the multifire toggle below
                     .End()
                 .Sequence(CompositeDecorator::Success) // Continuously reassess fight-vs-flee using energy relative to the target, instead of a fixed timer.
                     .Child<EnergyDisadvantageNode>("target", "target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent)
@@ -419,6 +456,24 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .End()
                     .Sequence()  //Keep enemy distance while reacharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
+                        .Sequence(CompositeDecorator::Success) // Drop a mine behind us to make a chaser break off - only while genuinely running, at speed, with them close but not on top of us.
+                            .Child<AtMaxSpeedNode>(kRocketMinSpeedPercent)
+                            .Child<DistanceThresholdNode>("target_position", "self_position", kMineMinPursuerDistance)
+                            .InvertChild<DistanceThresholdNode>("target_position", "self_position", kMineMaxPursuerDistance)
+                            .Child<TimerExpiredNode>("mine_timer")
+                            .Child<MineAvailableNode>()
+                            .Child<InputActionNode>(InputAction::Mine)
+                            .Child<TimerSetNode>("mine_timer", 500)
+                            .End()
+                        .Sequence(CompositeDecorator::Success) // Rocket clear when someone is closing on us and we're already at running speed.
+                            .Child<ShipItemCountThresholdNode>(ShipItemType::Rocket)
+                            .InvertChild<RocketActiveQueryNode>()
+                            .Child<AtMaxSpeedNode>(kRocketMinSpeedPercent)
+                            .InvertChild<DistanceThresholdNode>("target_position", "self_position", kRocketEscapeDistance)
+                            .Child<TimerExpiredNode>("rocket_timer")
+                            .Child<InputActionNode>(InputAction::Rocket)
+                            .Child<TimerSetNode>("rocket_timer", 1500)
+                            .End()
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
                             .Child<FleeNode>("nearest_aimshot", kLeashDistance, 5.0f, 0.2f, "target_energy")
@@ -447,11 +502,13 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                     .InvertChild<ScalarThresholdNode<float>>("target_energy", kLowEnergyRushThreshold)
                                     .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
                                     .Child<ScalarNode>(1.0f, "rushing") // set rushing status 
-                                    .Sequence(CompositeDecorator::Success) //Optionally rocket if the target is too far and we have decent energy
+                                    .Sequence(CompositeDecorator::Success) //Rocket down a fleeing kill, but only once we're already moving - lit from slow it mostly buys back speed we'd have reached anyway, and it overshoots.
                                         .Child<ShipItemCountThresholdNode>(ShipItemType::Rocket) // check we have rocket items
                                         .Child<PlayerEnergyPercentThresholdNode>(0.6f) // check we have sufficient energy
-                                        .InvertChild<DistanceThresholdNode>("target_position", 30.0f)  //dont rocket if too far away
-                                        .Child<DistanceThresholdNode>("target_position", 10.0f)  //dont rocket if right on them you'll overshoot
+                                        .InvertChild<RocketActiveQueryNode>() // don't stack one on top of a burn already running
+                                        .Child<AtMaxSpeedNode>(kRocketMinSpeedPercent)
+                                        .InvertChild<DistanceThresholdNode>("target_position", kRocketChaseMaxDistance)  //dont rocket if too far away
+                                        .Child<DistanceThresholdNode>("target_position", kRocketChaseMinDistance)  //dont rocket if right on them you'll overshoot
                                         .Child<TimerExpiredNode>("rocket_timer") // check cooldown period
                                         .Child<InputActionNode>(InputAction::Rocket) // use rockets
                                         .Child<TimerSetNode>("rocket_timer", 1500) // set a rocket cooldown period
