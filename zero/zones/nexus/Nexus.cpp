@@ -11,18 +11,15 @@
 #include <zero/zones/nexus/FoursBehavior.h>
 #include <zero/zones/nexus/TwosBoxBehavior.h>
 
-#include <zero/zones/nexus/LivesTracker.h>
-
 #include <zero/zones/nexus/Nexus.h>
 
 namespace zero {
 namespace nexus {
 
-struct NexusController : ZoneController, EventHandler<ChatEvent>, EventHandler<PlayerDeathEvent> {
+struct NexusController : ZoneController, EventHandler<ChatEvent> {
    bool IsZone(Zone zone) override {
     bot->execute_ctx.blackboard.Erase("nexus");
     bot->execute_ctx.blackboard.Erase("flag_position");
-    bot->execute_ctx.blackboard.Erase("lives_tracker");
     nexus = nullptr;
     return zone == Zone::Nexus;
   }
@@ -30,12 +27,10 @@ struct NexusController : ZoneController, EventHandler<ChatEvent>, EventHandler<P
   void CreateBehaviors(const char* arena_name) override;
 
   void HandleEvent(const ChatEvent& event) override;
-  void HandleEvent(const PlayerDeathEvent& event) override;
 
   //void CreateFlagroomBitset();
 
   std::unique_ptr<Nexus> nexus;
-  LivesTracker lives_tracker;
 };
 
 static NexusController controller;
@@ -71,20 +66,8 @@ void NexusController::HandleEvent(const ChatEvent& event) {
     if (message.find("GO!") != std::string::npos) {
       Log(LogLevel::Info, "Match start message received, expiring match_startup.");
       bot->execute_ctx.blackboard.Set<u32>("match_startup", GetCurrentTick());
-
-      // A fresh match means everyone is back to a full set of lives. Without this the tracker
-      // would carry the previous match's deaths forward and immediately treat opponents as
-      // nearly eliminated.
-      lives_tracker.Reset();
     }
   }
-}
-
-void NexusController::HandleEvent(const PlayerDeathEvent& event) {
-  lives_tracker.OnDeath(event.player.name);
-
-  Log(LogLevel::Info, "%s died (%u deaths, %u lives left).", event.player.name,
-      lives_tracker.DeathsOf(event.player.name), lives_tracker.LivesRemaining(event.player.name));
 }
 
 void NexusController::CreateBehaviors(const char* arena_name) {
@@ -94,15 +77,6 @@ void NexusController::CreateBehaviors(const char* arena_name) {
 
   nexus = std::make_unique<Nexus>();
   bot->execute_ctx.blackboard.Set("nexus", nexus.get());
-
-  // Elimination matches are typically 3 lives, but it's a per-match setting, so allow it to be
-  // configured (Nexus:MatchLives) rather than baking the number in.
-  auto opt_lives = bot->config->GetInt("Nexus", "MatchLives");
-  lives_tracker.starting_lives = opt_lives ? (u32)*opt_lives : 3;
-  lives_tracker.Reset();
-  bot->execute_ctx.blackboard.Set("lives_tracker", &lives_tracker);
-
-  Log(LogLevel::Info, "Nexus match lives set to %u.", lives_tracker.starting_lives);
 
   auto& repo = bot->bot_controller->behaviors;
 

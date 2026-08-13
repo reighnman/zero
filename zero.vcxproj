@@ -247,7 +247,6 @@
     <ClInclude Include="zero\zones\hockey\nodes\RinkNode.h" />
     <ClInclude Include="zero\zones\hockey\OffenseBehavior.h" />
     <ClInclude Include="zero\zones\nexus\FoursBehavior.h" />
-    <ClInclude Include="zero\zones\nexus\LivesTracker.h" />
     <ClInclude Include="zero\zones\nexus\nodes\NearestTeammatePlayerPositionQueryNode.h" />
     <ClInclude Include="zero\zones\nexus\nodes\TargetEnergyPercentThresholdNode.h" />
     <ClInclude Include="zero\zones\nexus\TwosBoxBehavior.h" />
