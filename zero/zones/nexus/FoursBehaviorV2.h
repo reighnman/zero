@@ -7,11 +7,14 @@
 namespace zero {
 namespace nexus {
 
-struct PubCoverBehavior : public behavior::Behavior {
+// Redesign of FoursBehavior with combat tuning/structure derived from analysis of real 4v4 league
+// replay data (see ZeroReplayAnalyzer, a standalone tool outside this repo) rather than guessed
+// constants - see FoursBehaviorV2.cpp for the specific empirical findings behind each change.
+// Registered separately from "fours" so the two can be A/B tested against each other.
+struct FoursBehaviorV2 : public behavior::Behavior {
   void OnInitialize(behavior::ExecuteContext& ctx) override {
-    // Setup blackboard here for this specific behavior
-    ctx.blackboard.Set("request_ship", 0);
-    ctx.blackboard.Set("leash_distance", 35.0f);
+    ctx.blackboard.Set("request_ship", 4);
+    ctx.blackboard.Set("startup_damage_trigger", "50");
 
     std::vector<Vector2f> waypoints{
         Vector2f(410, 415), Vector2f(615, 395), Vector2f(515, 545), Vector2f(505, 680), Vector2f(355, 545),

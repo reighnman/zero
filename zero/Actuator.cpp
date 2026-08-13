@@ -63,14 +63,24 @@ void Actuator::Update(Game& game, InputState& input, const Vector2f& force, floa
   if (has_force) {
     if (behind) {
       input.SetAction(InputAction::Backward, true);
+      input.SetAction(InputAction::Forward, false);
     } else {
       input.SetAction(InputAction::Forward, true);
+      input.SetAction(InputAction::Backward, false);
     }
+  } else {
+    // No force this tick - release thrust instead of leaving whatever was last pressed stuck on.
+    input.SetAction(InputAction::Forward, false);
+    input.SetAction(InputAction::Backward, false);
   }
 
   if (heading.Dot(steering_direction) < 0.996f) {
     input.SetAction(InputAction::Right, clockwise);
     input.SetAction(InputAction::Left, !clockwise);
+  } else {
+    // Already aligned - release rotation instead of leaving the last turn direction stuck on.
+    input.SetAction(InputAction::Right, false);
+    input.SetAction(InputAction::Left, false);
   }
 }
 

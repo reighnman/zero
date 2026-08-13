@@ -4,24 +4,27 @@
 #include <zero/game/GameEvent.h>
 #include <zero/game/Logger.h>
 #include <zero/zones/ZoneController.h>
-#include <zero/zones/nexus/PubOffenseBehavior.h>
-#include <zero/zones/nexus/PubCoverBehavior.h>
 #include <zero/zones/nexus/TestBehavior.h>
 #include <zero/zones/nexus/DuelBehavior.h>
 #include <zero/zones/nexus/TwosBehavior.h>
 #include <zero/zones/nexus/ThreesBehavior.h>
 #include <zero/zones/nexus/FoursBehavior.h>
+#include <zero/zones/nexus/FoursBehaviorV2.h>
+#include <zero/zones/nexus/ThreesBehaviorV2.h>
 #include <zero/zones/nexus/TwosBoxBehavior.h>
+
+#include <zero/zones/nexus/LivesTracker.h>
 
 #include <zero/zones/nexus/Nexus.h>
 
 namespace zero {
 namespace nexus {
 
-struct NexusController : ZoneController, EventHandler<ChatEvent> {
+struct NexusController : ZoneController, EventHandler<ChatEvent>, EventHandler<PlayerDeathEvent> {
    bool IsZone(Zone zone) override {
     bot->execute_ctx.blackboard.Erase("nexus");
     bot->execute_ctx.blackboard.Erase("flag_position");
+    bot->execute_ctx.blackboard.Erase("lives_tracker");
     nexus = nullptr;
     return zone == Zone::Nexus;
   }
@@ -29,42 +32,61 @@ struct NexusController : ZoneController, EventHandler<ChatEvent> {
   void CreateBehaviors(const char* arena_name) override;
 
   void HandleEvent(const ChatEvent& event) override;
+  void HandleEvent(const PlayerDeathEvent& event) override;
 
   //void CreateFlagroomBitset();
 
   std::unique_ptr<Nexus> nexus;
+  LivesTracker lives_tracker;
 };
 
 static NexusController controller;
 
 void NexusController::HandleEvent(const ChatEvent& event) {
-  std::string sender = event.sender;
-  std::string message = event.message;
+  // We only ever care about Team and Arena messages here -
+  // no reason to build strings out of Public/Private/Channel/etc. traffic we never look at.
+  if (event.type == ChatType::Team) {
+    std::string sender = event.sender;
+    std::string message = event.message;
 
-  
-  auto& chat_queue = bot->bot_controller->chat_queue;
-  
-  
-  if (event.type == ChatType::Team && message.find("SAFE") != std::string::npos && 
-      !(message.find("NOT") != std::string::npos)) {  
-    
+    if (message.find("SAFE") != std::string::npos && message.find("NOT") == std::string::npos) {
       // SAFE
-    Log(LogLevel::Info, "Setting tchat_safe");
-    bot->execute_ctx.blackboard.Set("tchat_safe", sender);
-    bot->execute_ctx.blackboard.Set<u32>("tchat_safe_timer", GetCurrentTick() + 600);
-   
-    // Event::Dispatch(ChatQueueEvent::Public("On my way!"));
-  } else if (event.type == ChatType::Team && message.find("SAFE") != std::string::npos &&
-    
+      Log(LogLevel::Info, "Setting tchat_safe");
+      bot->execute_ctx.blackboard.Set("tchat_safe", sender);
+      bot->execute_ctx.blackboard.Set<u32>("tchat_safe_timer", GetCurrentTick() + 600);
+    } else if (message.find("SAFE") != std::string::npos && message.find("NOT") != std::string::npos) {
       // NOT SAFE
-    message.find("NOT") != std::string::npos) {
-    Log(LogLevel::Info, "Setting tchat_notsafe");
-    bot->execute_ctx.blackboard.Set("tchat_notsafe", sender);
-    bot->execute_ctx.blackboard.Set<u32>("tchat_notsafe_timer", GetCurrentTick() + 600);
+      Log(LogLevel::Info, "Setting tchat_notsafe");
+      bot->execute_ctx.blackboard.Set("tchat_notsafe", sender);
+      bot->execute_ctx.blackboard.Set<u32>("tchat_notsafe_timer", GetCurrentTick() + 600);
+    }
+  } else if (event.type == ChatType::Arena) {
+    std::string message = event.message;
 
-    // Event::Dispatch(ChatQueueEvent::Public("On my way!"));
+    // The match system sends "GO!" as an arena message once the ready check finishes and the
+    // match actually begins. All of the versus behaviors (Fours, Duel, Twos, TwosBox, Threes) set
+    // a "match_startup" timer with a blind guess at how long ready-up will take when they leave
+    // spec, then gate ship entry / pre-fire / engaging on it expiring. Forcing that same key to
+    // expire the instant we see "GO!" makes them react to the real match start instead of the
+    // guess, without needing any changes in the individual behaviors - the blind timer they set
+    // on leaving spec becomes just a safety net in case this message is ever missed.
+    if (message.find("GO!") != std::string::npos) {
+      Log(LogLevel::Info, "Match start message received, expiring match_startup.");
+      bot->execute_ctx.blackboard.Set<u32>("match_startup", GetCurrentTick());
+
+      // A fresh match means everyone is back to a full set of lives. Without this the tracker
+      // would carry the previous match's deaths forward and immediately treat opponents as
+      // nearly eliminated.
+      lives_tracker.Reset();
+    }
   }
+}
 
+void NexusController::HandleEvent(const PlayerDeathEvent& event) {
+  lives_tracker.OnDeath(event.player.name);
+
+  Log(LogLevel::Info, "%s died (%u deaths, %u lives left).", event.player.name,
+      lives_tracker.DeathsOf(event.player.name), lives_tracker.LivesRemaining(event.player.name));
 }
 
 void NexusController::CreateBehaviors(const char* arena_name) {
@@ -75,19 +97,27 @@ void NexusController::CreateBehaviors(const char* arena_name) {
   nexus = std::make_unique<Nexus>();
   bot->execute_ctx.blackboard.Set("nexus", nexus.get());
 
+  // Elimination matches are typically 3 lives, but it's a per-match setting, so allow it to be
+  // configured (Nexus:MatchLives) rather than baking the number in.
+  auto opt_lives = bot->config->GetInt("Nexus", "MatchLives");
+  lives_tracker.starting_lives = opt_lives ? (u32)*opt_lives : 3;
+  lives_tracker.Reset();
+  bot->execute_ctx.blackboard.Set("lives_tracker", &lives_tracker);
+
+  Log(LogLevel::Info, "Nexus match lives set to %u.", lives_tracker.starting_lives);
+
   auto& repo = bot->bot_controller->behaviors;
 
-  repo.Add("puboffense", std::make_unique<PubOffenseBehavior>());
-  repo.Add("pubcover", std::make_unique<PubCoverBehavior>());
   repo.Add("duel", std::make_unique<DuelBehavior>());
   repo.Add("twos", std::make_unique<TwosBehavior>());
   repo.Add("threes", std::make_unique<ThreesBehavior>());
   repo.Add("fours", std::make_unique<FoursBehavior>());
+  repo.Add("foursv2", std::make_unique<FoursBehaviorV2>());
+  repo.Add("threesv2", std::make_unique<ThreesBehaviorV2>());
   repo.Add("twosbox", std::make_unique<TwosBoxBehavior>());
   repo.Add("test", std::make_unique<TestBehavior>());
-  
 
-  SetBehavior("puboffense");
+  SetBehavior("duel");
 }
 
 }  // namespace nexus
