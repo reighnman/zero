@@ -36,7 +36,6 @@
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
 #include <zero/zones/nexus/nodes/PredictiveAimNode.h>
-#include <zero/zones/nexus/nodes/ShotSpreadNode.h>
 #include <zero/zones/nexus/nodes/TargetAccelerationNode.h>
 
 #include <zero/zones/nexus/Nexus.h>
@@ -122,8 +121,18 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // this gate restores.
   constexpr float kBombFriendlyBlastMargin = 6.0f;
 
-  // How far away a target needs to be before we start varying our shots around the target.
-  constexpr float kShotSpreadDistanceThreshold = 40.0f;
+  // Don't take bullet shots past this. Two things made long-range fire actively wasteful rather
+  // than merely low-value: the aim solver was under-leading (fixed in PredictiveAimNode), and
+  // beyond 40 tiles the tree was deliberately wobbling the aimpoint by up to 3 tiles via
+  // ShotSpreadNode - so the bot was spraying randomized shots exactly where they were least likely
+  // to land. Measured bullet hit rate is 7.4% at 35-39 tiles and below 7% past that, against
+  // 13-16% at 15-19 and 33% at 10-14.
+  //
+  // This is set to trim the wasteful tail (the bot's 90th-percentile firing range was 53 tiles),
+  // not to make the bot stingy. It deliberately isn't pulled in much further: volume of fire is the
+  // one metric that separated winning from losing players in the replay corpus (24.0 vs 19.2
+  // shots/min alive), so cutting deep into ordinary firing range would imitate the losing half.
+  constexpr float kMaxBulletRange = 35.0f;
 
   //  If an enemy is near us and we're low energy thor if below this value
   constexpr float kThorEnemyThreshold = 200.0f;
@@ -198,10 +207,13 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // where the target is actually trending, instead of assuming they hold their current velocity.
   constexpr float kAimLeadBiasSeconds = 0.2f;
 
-  // Acceleration magnitude (units/sec^2) treated as "fully erratic" for shot spread purposes - a
-  // target maneuvering at or above this gets the full spread, below it gets scaled-down spread.
-  // Starting guess, needs tuning against real play.
-  constexpr float kShotSpreadManeuveringNormalizer = 4.0f;
+  // Shot spread has been dropped from this tree entirely (the ShotSpreadNode header stays - other
+  // nexus behaviors still use it). It scaled deliberate aim error by how hard the target was
+  // maneuvering, on the theory that a dodging target needs to be hedged against rather than aimed
+  // at precisely. The replay corpus doesn't support the premise: bullet hit rate is flat at ~13%
+  // across every target lateral-speed bucket from 0-2 up to 18-20 tiles/sec, so accuracy is limited
+  // by range, not by how much the target is jinking. Deliberate spread was therefore pure accuracy
+  // loss layered on top of an aim solver that was already under-leading.
 
   // Enter a defensive (recharging) state once our energy drops below this fraction of the
   // target's estimated energy, and don't leave it again until we recover past the higher exit
@@ -281,6 +293,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .Child<PlayerEnergyQueryNode>("target", "target_energy")
                         .Child<TargetAccelerationNode>("target", "target_acceleration")
                         .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds)
+                        .Child<PredictiveAimNode>(WeaponType::Bomb, "target", "target_acceleration", "bomb_aimshot", kAimLeadBiasSeconds) //Bombs fly slower than bullets, so they need their own (larger) lead
                         .Child<PlayerPositionQueryNode>("target", "nearest_target_position") //Addionally copy to nearest so we can use it later
                         .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "nearest_aimshot", kAimLeadBiasSeconds)
                         .End()
@@ -296,6 +309,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .Child<PlayerEnergyQueryNode>("target", "target_energy")  //Override
                         .Child<TargetAccelerationNode>("target", "target_acceleration")  //Override
                         .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds) //Override
+                        .Child<PredictiveAimNode>(WeaponType::Bomb, "target", "target_acceleration", "bomb_aimshot", kAimLeadBiasSeconds) //Override
                         .End()
                 .End()
                 .Sequence(CompositeDecorator::Success) // If we have a portal but no location, lay one down.
@@ -389,11 +403,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
                         .End()
                     .Sequence() // Aim at target and shoot while seeking them.
-                        .Child<TimerExpiredNode>("match_startup") 
-                        .Sequence(CompositeDecorator::Success)
-                            .Child<DistanceThresholdNode>("target_position", kShotSpreadDistanceThreshold)
-                            .Child<ShotSpreadNode>("aimshot", 3.0f, 1.0f, "target_acceleration", kShotSpreadManeuveringNormalizer)
-                            .End()
+                        .Child<TimerExpiredNode>("match_startup")
                         .Parallel()
                             .Child<FaceNode>("aimshot")
                             .Child<BlackboardEraseNode>("rushing") // Clear rushing status
@@ -471,7 +481,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                             .Sequence(CompositeDecorator::Success) // Bomb fire check.
                                 .Child<TimerExpiredNode>("match_startup") // Ensure match countdown timer has expired
                                 .Child<TimerExpiredNode>("recharge_timer")  // Ensure we're not still in a fleeing state
-                                .Child<VectorSubtractNode>("aimshot", "self_position", "target_direction", true) //check target aim
+                                .Child<VectorSubtractNode>("bomb_aimshot", "self_position", "target_direction", true) //check target aim
                                 .Child<PlayerVelocityQueryNode>("self_velocity") // get our current velocity
                                 .Child<VectorDotNode>("self_velocity", "target_direction", "forward_velocity")  // compare our velocity to target
                                 .Child<ScalarThresholdNode<float>>("forward_velocity", 2.0f) // confirm velocity is sufficient
@@ -483,11 +493,11 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Child<ScalarThresholdNode<float>>("outgoing_damage", kBombRequiredDamageOverlap) // Check if we have enough bullets overlapping outgoing damage to fire a bomb into.
                                 .InvertChild<DistanceThresholdNode>("nearest_target_position", 50.0f)  //dont bomb from too far
                                 .Child<DistanceThresholdNode>("nearest_target_position", 12.0f)  //dont pb yourself (dont use target here in case a teammate is on top)
-                                .Child<BombBlastSafetyNode>("aimshot", kBombFriendlyBlastMargin)  //never bomb when the blast would catch us or a teammate - fall through to bullets instead
+                                .Child<BombBlastSafetyNode>("bomb_aimshot", kBombFriendlyBlastMargin)  //never bomb when the blast would catch us or a teammate - fall through to bullets instead
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity") // check bomb velocity
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray") // check collision ray
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", kBombProximityMultiplier) // lob range, not a precise hit
-                                .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds") 
+                                .Child<MoveRectangleNode>("target_bounds", "bomb_aimshot", "target_bounds")
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
                                 .Child<RenderRayNode>("world_camera", "bomb_fire_ray", 50.0f, Vector3f(1.0f, 1.0f, 0.0f))
                                 .Child<RayRectangleInterceptNode>("bomb_fire_ray", "target_bounds")
@@ -513,6 +523,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                             .Sequence(CompositeDecorator::Success) // Determine if a shot should be fired by using weapon trajectory and bounding boxes.
                                 .Child<TimerExpiredNode>("match_startup") // Ensure match countdown timer has expired            
                                 .Child<TimerExpiredNode>("recharge_timer") // Ensure we're not still in a fleeing state
+                                .InvertChild<DistanceThresholdNode>("target_position", kMaxBulletRange) // Don't spray at ranges where bullets essentially never connect
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
