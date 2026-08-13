@@ -248,16 +248,8 @@
     <ClInclude Include="zero\zones\hockey\OffenseBehavior.h" />
     <ClInclude Include="zero\zones\nexus\FoursBehavior.h" />
     <ClInclude Include="zero\zones\nexus\LivesTracker.h" />
-    <ClInclude Include="zero\zones\nexus\nodes\EnclosureQuery.h" />
-    <ClInclude Include="zero\zones\nexus\nodes\EngagementPhaseNode.h" />
-    <ClInclude Include="zero\zones\nexus\nodes\TrapTargetNode.h" />
-    <ClInclude Include="zero\zones\nexus\nodes\WallEscapeNode.h" />
-    <ClInclude Include="zero\zones\nexus\nodes\HerdingBombAimNode.h" />
-    <ClInclude Include="zero\zones\nexus\nodes\IsolatedTargetNode.h" />
-    <ClInclude Include="zero\zones\nexus\nodes\TeamAdvantageNode.h" />
     <ClInclude Include="zero\zones\nexus\nodes\NearestTeammatePlayerPositionQueryNode.h" />
     <ClInclude Include="zero\zones\nexus\nodes\TargetEnergyPercentThresholdNode.h" />
-    <ClInclude Include="zero\zones\nexus\nodes\WeaponEnergyBandNode.h" />
     <ClInclude Include="zero\zones\nexus\TwosBoxBehavior.h" />
     <ClInclude Include="zero\zones\nexus\nodes\PlayerByNameNode.h" />
     <ClInclude Include="zero\zones\nexus\nodes\LowestTargetNode.h" />

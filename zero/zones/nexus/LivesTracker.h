@@ -14,9 +14,8 @@ namespace nexus {
 // but it's a per-match setting, so `starting_lives` is configurable rather than hardcoded. A team
 // wins by knocking out every opposing player, which makes an opponent's remaining lives a real
 // strategic quantity: an enemy on their last life is worth far more to kill than a fresh one,
-// because removing them permanently reduces the other team's numbers for the rest of the match.
-// That compounds with the local-advantage effect measured in the replay corpus - every permanent
-// removal shifts every subsequent fight toward our side.
+// because removing them permanently reduces the other team's numbers for the rest of the match -
+// every permanent removal shifts every subsequent fight toward our side.
 //
 // Keyed by player name rather than player id, because ids are only stable for the current session
 // and get recycled as players leave and rejoin between rounds, whereas the name is what identifies

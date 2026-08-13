@@ -9,10 +9,9 @@ namespace zero {
 namespace nexus {
 
 // Threshold check against a target's energy as a percent of *their* true maximum energy, instead
-// of the target's raw estimated energy value against a ship-specific magic number. Replay analysis
-// of real 4v4 play showed the energy level at which players commit to finishing a kill, throw a
-// thor, etc. is consistent as a percent of max energy across ships/bounties, not as an absolute
-// value - the same percent math EnergyDisadvantageNode already uses internally for its own
+// of the target's raw estimated energy value against a ship-specific magic number. The energy level
+// worth committing to a kill at is consistent as a percent of max energy across ships/bounties, not
+// as an absolute value - the same percent math EnergyDisadvantageNode already uses internally for its own
 // self-vs-target comparison, exposed here as a standalone threshold check for target-only use
 // (rush/press/thor triggers that don't need the full hysteresis state machine).
 struct TargetEnergyPercentThresholdNode : public behavior::BehaviorNode {
