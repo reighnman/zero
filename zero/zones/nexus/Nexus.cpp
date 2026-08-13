@@ -11,6 +11,7 @@
 #include <zero/zones/nexus/FoursBehavior.h>
 #include <zero/zones/nexus/FoursBehaviorV2.h>
 #include <zero/zones/nexus/ThreesBehaviorV2.h>
+#include <zero/zones/nexus/TwosBehaviorV2.h>
 #include <zero/zones/nexus/TwosBoxBehavior.h>
 
 #include <zero/zones/nexus/LivesTracker.h>
@@ -114,6 +115,7 @@ void NexusController::CreateBehaviors(const char* arena_name) {
   repo.Add("fours", std::make_unique<FoursBehavior>());
   repo.Add("foursv2", std::make_unique<FoursBehaviorV2>());
   repo.Add("threesv2", std::make_unique<ThreesBehaviorV2>());
+  repo.Add("twosv2", std::make_unique<TwosBehaviorV2>());
   repo.Add("twosbox", std::make_unique<TwosBoxBehavior>());
   repo.Add("test", std::make_unique<TestBehavior>());
 
