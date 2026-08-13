@@ -34,6 +34,7 @@
 #include <zero/zones/nexus/nodes/RocketUsageNode.h>
 #include <zero/zones/nexus/nodes/MineAvailableNode.h>
 #include <zero/zones/nexus/nodes/EnemiesNearTargetNode.h>
+#include <zero/zones/nexus/nodes/TeamFocusTargetNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
@@ -147,11 +148,15 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // reaching a speed we'd have reached anyway, and while chasing it also risks sailing straight past
   // the target. So both uses below require us to already be moving.
   constexpr float kRocketMinSpeedPercent = 0.8f;
-  // Chasing: only worth it if there's real ground to make up. Inside this we'd overshoot.
-  constexpr float kRocketChaseMinDistance = 12.0f;
+  // Chasing: only worth it if there's a real gap to close. Raised from 12 after the first live test
+  // came out visibly rocket-happy - at that range we were spending a limited item to cover ground
+  // ordinary thrust would have covered, and then overshooting the target. This branch already sits
+  // inside the rush sequence, so a rocket now means specifically "we are pressing a target we know
+  // is weak, and it is far enough away to be getting off the hook".
+  constexpr float kRocketChaseMinDistance = 16.0f;
   constexpr float kRocketChaseMaxDistance = 35.0f;
-  // Escaping: light it when whoever is chasing us is this close and still coming.
-  constexpr float kRocketEscapeDistance = 18.0f;
+  // Escaping: only once whoever is chasing is genuinely running us down, not merely following.
+  constexpr float kRocketEscapeDistance = 12.0f;
 
   // --- Mines ---
   // Measured off the human in the bot-vs-human replays: he laid exactly one mine per match, both
@@ -211,6 +216,11 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // tiles against 16.3% at 15-19. Orbiting at 12 puts the whole pump cycle below that cliff instead
   // of straddling it, and matches the 11.4t median range at which replay kills actually land.
   constexpr float kOrbitDistance = 12.0f;
+
+  // An enemy inside this range is our problem regardless of what the rest of the team is doing -
+  // we can't ignore someone shooting us in the face to go help elsewhere. Outside it, defer to the
+  // team's focus target so four bots stop splitting into four separate duels.
+  constexpr float kSelfDefenseDistance = 15.0f;
 
   // Radius used for the local head-count that decides whether we're supported or outnumbered.
   // Matches the radius the replay analysis bucketed on, so the exchange table it came from applies.
@@ -357,6 +367,15 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .Child<PredictiveAimNode>(WeaponType::Bomb, "target", "target_acceleration", "bomb_aimshot", kAimLeadBiasSeconds) //Bombs fly slower than bullets, so they need their own (larger) lead
                         .Child<PlayerPositionQueryNode>("target", "nearest_target_position") //Addionally copy to nearest so we can use it later
                         .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "nearest_aimshot", kAimLeadBiasSeconds)
+                        .End()
+                     .Sequence(CompositeDecorator::Success) //Fight what the team is fighting, unless someone is already on top of us
+                        .Child<DistanceThresholdNode>("target_position", "self_position", kSelfDefenseDistance) //If an enemy is right on us, deal with them instead
+                        .Child<TeamFocusTargetNode>("target")
+                        .Child<PlayerPositionQueryNode>("target", "target_position")  //Override
+                        .Child<PlayerEnergyQueryNode>("target", "target_energy")  //Override
+                        .Child<TargetAccelerationNode>("target", "target_acceleration")  //Override
+                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds) //Override
+                        .Child<PredictiveAimNode>(WeaponType::Bomb, "target", "target_acceleration", "bomb_aimshot", kAimLeadBiasSeconds) //Override
                         .End()
                      .Sequence(CompositeDecorator::Success) //If is someone low nearby override target
                         .Child<TimerExpiredNode>("recharge_timer") //Nearest target should be used when recharing
