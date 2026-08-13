@@ -29,6 +29,7 @@
 #include <zero/zones/nexus/nodes/LocalAdvantageNode.h>
 #include <zero/zones/nexus/nodes/EngagementRangeNode.h>
 #include <zero/zones/nexus/nodes/BombBlastSafetyNode.h>
+#include <zero/zones/nexus/nodes/TeamCentroidNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
@@ -137,8 +138,19 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   //  If an enemy is near us and we're low energy thor if below this value
   constexpr float kThorEnemyThreshold = 200.0f;
 
-  // How far away from a teammate before we regroup
+  // How far away from a teammate before we regroup (attach-to-safe-teammate check only).
   constexpr float kTeamRange = 40.0f;
+
+  // How far we're willing to drift from the team's centre of mass before rejoining it.
+  //
+  // The old rule fired at 40 tiles from a single teammate, which is far too late: in the 12-0
+  // bot-vs-human replay every death happened with no teammate at all inside 25 tiles, at a median
+  // 58.6 tiles from the nearest one. By the time a 40-tile pairwise check trips, the bot is already
+  // in the situation that kills it. The two sides of that match separated at roughly 24 tiles
+  // (winners) against 43 (losers) of median support distance, so this sits just above the winning
+  // side's spacing - close enough to hold a group, loose enough not to fire constantly while
+  // fighting normally.
+  constexpr float kTeamCohesionRange = 30.0f;
 
   constexpr float kLeashDistance = 30.0f;
 
@@ -459,12 +471,11 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Sequence(CompositeDecorator::Success)
                                     .InvertChild<BlackboardSetQueryNode>("rushing")
                                     .Selector()
-                                        .Sequence() // Path to teammate if far away - still faces/fires/juke-dodges via this Parallel instead of running blind.
-                                            .Child<NearestTeammateNode>("nearest_teammate", 2) //Make sure we have at least 1 teammate close, if more than one stay with the broader group
-                                            .Child<PlayerPositionQueryNode>("nearest_teammate", "nearest_teammate_position")
-                                            .Child<DistanceThresholdNode>("nearest_teammate_position", kTeamRange) //If we're already near teammates dont run to them
-                                            .Child<ScalarThresholdNode<float>>("target_energy", kLowEnergyThreshold)  //If we're going for a kill or someone is diving dont run
-                                            .Child<GoToNode>("nearest_teammate_position")
+                                        .Sequence() // Rejoin the team when we've drifted off it - still faces/fires/juke-dodges via this Parallel instead of running blind.
+                                            .Child<TeamCentroidNode>("team_centroid") //Anchor on where the team actually is, not on one teammate who is themselves running somewhere else
+                                            .Child<DistanceThresholdNode>("team_centroid", kTeamCohesionRange)
+                                            .InvertChild<ScalarThresholdNode<float>>("local_advantage", 1.0f) //Only stay out on our own while we're actually up bodies locally
+                                            .Child<GoToNode>("team_centroid")
                                             .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
                                             .End()
                                         .Selector() // Close the gap while still far out, then circle instead of closing all the way to melee range.
