@@ -28,12 +28,26 @@ struct OrbitNode : public behavior::BehaviorNode {
   OrbitNode(const char* position_key, float orbit_distance, const char* direction_key)
       : position_key(position_key), orbit_distance(orbit_distance), direction_key(direction_key) {}
 
+  // Reads the radius from the blackboard instead of a fixed value, so EngagementRangeNode can move
+  // it in response to local head-count and the in-and-out pump.
+  OrbitNode(const char* position_key, const char* orbit_distance_key, const char* direction_key)
+      : position_key(position_key), orbit_distance_key(orbit_distance_key), direction_key(direction_key) {}
+
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
     if (!self || self->ship >= 8) return behavior::ExecuteResult::Failure;
 
     auto opt_position = ctx.blackboard.Value<Vector2f>(position_key);
     if (!opt_position.has_value()) return behavior::ExecuteResult::Failure;
+
+    float orbit_distance = this->orbit_distance;
+
+    if (orbit_distance_key) {
+      auto opt_distance = ctx.blackboard.Value<float>(orbit_distance_key);
+      if (!opt_distance.has_value()) return behavior::ExecuteResult::Failure;
+
+      orbit_distance = *opt_distance;
+    }
 
     Vector2f target_position = *opt_position;
     Vector2f to_self = self->position - target_position;
@@ -62,6 +76,7 @@ struct OrbitNode : public behavior::BehaviorNode {
 
   const char* position_key = nullptr;
   const char* direction_key = nullptr;
+  const char* orbit_distance_key = nullptr;
   float orbit_distance = 0.0f;
 
  private:

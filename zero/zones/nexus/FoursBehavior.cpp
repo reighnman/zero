@@ -27,7 +27,8 @@
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/nexus/nodes/FleeNode.h>
 #include <zero/zones/nexus/nodes/OrbitNode.h>
-#include <zero/zones/nexus/nodes/BroadsideFaceNode.h>
+#include <zero/zones/nexus/nodes/LocalAdvantageNode.h>
+#include <zero/zones/nexus/nodes/EngagementRangeNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
@@ -88,7 +89,13 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
 
   // Don't dodge below this
   constexpr float kLowEnergyRushThreshold = 400.0f;  // Rush threshold
-  constexpr float kRushDistanceThreshold = 10.0f;    // We will rush if someone is low energy within this range
+  // We will rush if someone is low energy within this range. Replay kills are landed off a
+  // committed, accelerating dive that *starts* well outside knife range - median killer-to-victim
+  // range runs 27t at 2s before the kill, 20t at 1s, 15.7t at 0.5s, 11.4t when it lands, with the
+  // killer's speed climbing 14.7 -> 16.9 tiles/sec across that window. Only committing once already
+  // inside 10 tiles means never reproducing that dive at all, since by then the kill has either
+  // happened or the target has slipped away.
+  constexpr float kRushDistanceThreshold = 20.0f;
   constexpr u32 kRushRepelThreshold = 1;             // If we don't have this many reps dont rush targets
   // Only press a target we've spotted as low energy ourselves if we have enough energy left to
   // commit to closing the distance - otherwise we'd be diving in already weak.
@@ -115,17 +122,51 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // Once within this distance of the target, stop closing further and circle instead - close
   // enough that they'll eventually fail to dodge a lobbed shot and we can dive in, far enough to
   // have room to maneuver instead of colliding.
-  constexpr float kOrbitDistance = 15.0f;
+  //
+  // Measured bullet hit rate falls off a cliff right where the old fixed 15.0f sat: 33.3% at 10-14
+  // tiles against 16.3% at 15-19. Orbiting at 12 puts the whole pump cycle below that cliff instead
+  // of straddling it, and matches the 11.4t median range at which replay kills actually land.
+  constexpr float kOrbitDistance = 12.0f;
+
+  // Radius used for the local head-count that decides whether we're supported or outnumbered.
+  // Matches the radius the replay analysis bucketed on, so the exchange table it came from applies.
+  constexpr float kLocalAdvantageRadius = 25.0f;
+
+  // Standoff to hold when the nearby head-count is against us. The exchange ratio while outnumbered
+  // is bad at every range (0.57 at 5-9 tiles, 0.68 at 15-19), so this isn't a range that wins - it's
+  // the range that loses least while we disengage and wait for a teammate.
+  constexpr float kOutnumberedDistance = 28.0f;
+
+  // In-and-out oscillation applied on top of whichever base range is active, timed off the observed
+  // rhythm: closing runs of a median 1.7s and back-off runs of 1.4s, each sweeping a median ~9-10
+  // tiles (p25 ~4). Amplitude is held to 4 rather than the full half-sweep so that the outer
+  // extreme of the supported cycle lands at 16 tiles instead of pushing past the accuracy cliff at
+  // 15 - the whole point of orbiting at 12 is to keep the cycle on the good side of it.
+  constexpr float kPumpAmplitude = 4.0f;
+  constexpr u32 kPumpHalfPeriodTicks = 150;  // ~1.5s per leg
 
   // Bomb hitbox tolerance multiplier while orbiting - bigger than the bullet/thor multiplier below
   // so bombs land as area denial off a near miss instead of needing a precise direct hit, like
   // lobbing them into blast range instead of sniping with them.
   constexpr float kBombProximityMultiplier = 8.0f;
 
-  // Fire bullets in short windows instead of spraying continuously while orbiting - a burst this
-  // long, then a forced pause this long before the next one. Bypassed entirely once rushing.
-  constexpr u32 kBurstFireDurationTicks = 30;   // ~0.3s of allowed fire
-  constexpr u32 kBurstFireCooldownTicks = 100;  // ~1s forced pause after
+  // Burst-fire pacing (a 0.3s firing window followed by a forced ~1s pause) used to live here and
+  // has been removed, because the corpus says it was modelling a habit that doesn't exist and
+  // costing us the one thing that actually separates strong players from weak ones.
+  //
+  // Players do not self-throttle: only 2.4% of inter-shot gaps fall under 0.2s, so the weapon's own
+  // cooldown is already the binding constraint and a synthetic pause on top of it is pure lost
+  // output. And ranking the 28 players with enough data by K/D, nearly every positioning metric is
+  // flat between the top and bottom thirds - median firing range 28.3 vs 28.7 tiles, hit rate 13.1%
+  // vs 12.9%, held range 31.2 vs 31.4, support distance 26.5 vs 26.0, damage taken 1.73 vs 1.76
+  // %max/sec. The metric that does separate them is volume of fire: 24.0 shots/min alive against
+  // 19.2, a 25% edge. A throttle that cuts our rate of fire is therefore imitating the losing half
+  // of the ladder.
+  //
+  // The between-volley BroadsideFaceNode branch went with it: it keyed off the burst timer, so with
+  // no bursts it would have fired on every orbiting tick instead of only during lulls. The data
+  // doesn't support broadside as a protective stance anyway - damage taken *rises* with heading
+  // offset, from 5.31 per sample nose-on to 8.10 at 90 degrees.
 
   // How long to keep pressing an advantage after the target loses energy (hit or spent shooting)
   // while we still have more than they do - a sustained window instead of a single-tick reaction,
@@ -278,6 +319,10 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .Child<InputActionNode>(InputAction::Antiwarp)
                         .End()
                     .End()
+                .Sequence(CompositeDecorator::Success) // Work out how close we should be fighting right now: the exchange favors closing hard at parity or better, and backing off while outnumbered.
+                    .Child<LocalAdvantageNode>(kLocalAdvantageRadius, "local_advantage")
+                    .Child<EngagementRangeNode>("local_advantage", "engagement_range", kOrbitDistance, kOutnumberedDistance, kPumpAmplitude, kPumpHalfPeriodTicks)
+                    .End()
                 .Sequence(CompositeDecorator::Success) // Continuously reassess fight-vs-flee using energy relative to the target, instead of a fixed timer.
                     .Child<EnergyDisadvantageNode>("target", "target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent)
                     .Child<TimerSetNode>("recharge_timer", 200)
@@ -336,15 +381,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                             .Child<ShotSpreadNode>("aimshot", 3.0f, 1.0f, "target_acceleration", kShotSpreadManeuveringNormalizer)
                             .End()
                         .Parallel()
-                            .Selector() // Face the target to line up a shot, or broadside between volleys while orbiting to stay dodge-ready.
-                                .Sequence()
-                                    .InvertChild<BlackboardSetQueryNode>("rushing") // not pressing
-                                    .InvertChild<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance) // actually orbiting, not still closing
-                                    .Child<TimerExpiredNode>("burst_fire_until") // between volleys, not mid-burst
-                                    .Child<BroadsideFaceNode>("target_position")
-                                    .End()
-                                .Child<FaceNode>("aimshot")
-                                .End()
+                            .Child<FaceNode>("aimshot")
                             .Child<BlackboardEraseNode>("rushing") // Clear rushing status
                             .Sequence(CompositeDecorator::Success) // Juke away from moderate incoming threats without breaking aim off the target.
                                 .Child<DodgeJukeNode>(30.0f)
@@ -353,6 +390,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                .Sequence() // If there is any low target with in this range prioritize
                                     .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold) //dont go into rush mode with no reps
                                     .Child<PlayerEnergyPercentThresholdNode>(kRushMinEnergyPercent) //only press if we have enough energy ourselves
+                                    .Child<ScalarThresholdNode<float>>("local_advantage", 0.0f) //diving while outnumbered loses the exchange ~2:1 no matter how weak the target looks
                                     .InvertChild<DistanceThresholdNode>("target_position", "self_position", kRushDistanceThreshold)
                                     .InvertChild<ScalarThresholdNode<float>>("target_energy", kLowEnergyRushThreshold)
                                     .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
@@ -371,6 +409,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                     .End()
                                 .Sequence() // Press the advantage for a while after the target loses energy (hit or spent shooting) and now has meaningfully less than we do.
                                     .InvertChild<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance * 2.0f) //still needs to be a fight we're actually in, not clear across the map
+                                    .Child<ScalarThresholdNode<float>>("local_advantage", 0.0f) //same reason as the rush above - committing forward only pays while we're not outnumbered
                                     .Child<PlayerCurrentEnergyQueryNode>("self_energy")
                                     .Sequence(CompositeDecorator::Success) // (Re)arm the window on a fresh drop - it doesn't need to still be dropping for the window to hold.
                                         .Child<LessThanNode<float>>("target_energy", "target_energy_prev")
@@ -406,10 +445,10 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                             .End()
                                         .Selector() // Close the gap while still far out, then circle instead of closing all the way to melee range.
                                             .Sequence()
-                                                .Child<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance)
+                                                .Child<DistanceThresholdNode>("target_position", "self_position", "engagement_range")
                                                 .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Zero)
                                                 .End()
-                                            .Child<OrbitNode>("aimshot", kOrbitDistance, "orbit_direction")
+                                            .Child<OrbitNode>("aimshot", "engagement_range", "orbit_direction")
                                             .End()
                                         .End()
                                     .Child<AvoidTeamNode>(kAvoidTeamDistance)
@@ -476,15 +515,6 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RayRectangleInterceptNode>("bullet_fire_ray", "target_bounds")
-                                .Selector() // Fire in short bursts instead of spraying continuously, unless committed to finishing a kill.
-                                    .Child<BlackboardSetQueryNode>("rushing")
-                                    .InvertChild<TimerExpiredNode>("burst_fire_until") // still inside an active burst window
-                                    .Sequence() // Pause between bursts is over - open a new window and let this shot through.
-                                        .Child<TimerExpiredNode>("burst_ready_at")
-                                        .Child<TimerSetNode>("burst_fire_until", kBurstFireDurationTicks)
-                                        .Child<TimerSetNode>("burst_ready_at", kBurstFireDurationTicks + kBurstFireCooldownTicks)
-                                        .End()
-                                    .End()
                                 .Child<InputActionNode>(InputAction::Bullet)
                                 .End()
                             .Child<ScalarNode>("target_energy", "target_energy_prev") // snapshot for next tick's hit/spend detection above
