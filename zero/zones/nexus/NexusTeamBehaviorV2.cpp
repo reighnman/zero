@@ -231,7 +231,20 @@ std::unique_ptr<behavior::BehaviorNode> CreateNexusTeamTreeV2(behavior::ExecuteC
                         .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds)
                         .End()
                     .End()
-                .Child<TeamAdvantageNode>(kSwarmRadius, "team_advantage")
+                // Local head count and engagement phase are both read further down this same tick
+                // (multifire, movement, weapon gating), so they must be computed before any of
+                // those - a consumer that runs first would silently be reading last tick's value.
+                // Success-wrapped so a momentarily invalid self/target drops us through to
+                // waypoints rather than aborting the whole combat branch.
+                .Sequence(CompositeDecorator::Success)
+                    .Child<TeamAdvantageNode>(kSwarmRadius, "team_advantage")
+                    .End()
+                .Sequence(CompositeDecorator::Success)
+                    .Child<EngagementPhaseNode>("target", "target_energy", "target_energy_prev", "phase",
+                                                 "energy_disadvantaged", "press_until",
+                                                 kFinishTargetPercent, kFinishDistance, kPressDistance, kPressTicks,
+                                                 kDisadvantageEnterRatio, kDisadvantageExitRatio, kCriticalEnergyPercent)
+                    .End()
                 .Sequence(CompositeDecorator::Success) // Lay a portal down if we have one but no location.
                     .Child<ShipItemCountThresholdNode>(ShipItemType::Portal, 1)
                     .InvertChild<ShipPortalPositionQueryNode>()
@@ -266,12 +279,6 @@ std::unique_ptr<behavior::BehaviorNode> CreateNexusTeamTreeV2(behavior::ExecuteC
                         .Child<PlayerStatusQueryNode>(Status_Antiwarp)
                         .Child<InputActionNode>(InputAction::Antiwarp)
                         .End()
-                    .End()
-                .Sequence(CompositeDecorator::Success) // Classify the tick. Success-wrapped so losing the target drops us to waypoints instead of aborting the whole combat branch.
-                    .Child<EngagementPhaseNode>("target", "target_energy", "target_energy_prev", "phase",
-                                                 "energy_disadvantaged", "press_until",
-                                                 kFinishTargetPercent, kFinishDistance, kPressDistance, kPressTicks,
-                                                 kDisadvantageEnterRatio, kDisadvantageExitRatio, kCriticalEnergyPercent)
                     .End()
                 .Sequence(CompositeDecorator::Success) // Re-arm the recharge/retreat timer for as long as we're disadvantaged.
                     .Child<EqualityNode<EngagementPhase>>(EngagementPhase::Disadvantaged, "phase")
