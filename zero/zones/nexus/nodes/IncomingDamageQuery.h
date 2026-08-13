@@ -15,6 +15,46 @@ struct IncomingDamageReport {
   u32 weapon_count;
 };
 
+// Fraction of a blast weapon's maximum damage we would actually take if it went off at
+// `miss_distance` tiles from us, mirroring the falloff ShipController applies:
+//
+//     distance = max(0, dist_pixels - kBombSize)
+//     damage   = (explode_pixels - distance) * bomb_damage / explode_pixels
+//
+// Returns 0 outside the blast and 1 for a dead-centre hit. Without this, a bomb that will pass at
+// the rim of its own blast - doing essentially nothing - is scored as a full-damage hit, which both
+// makes the bot panic-dodge harmless shots and makes it spend repels on survivable ones.
+inline float GetBlastDamageFraction(Connection& connection, u8 level, float miss_distance) {
+  float explode_pixels = (float)(connection.settings.BombExplodePixels + connection.settings.BombExplodePixels * level);
+  if (explode_pixels <= 0.0f) return 1.0f;
+
+  constexpr float kBombSize = 2.0f;
+  float distance_pixels = miss_distance * 16.0f - kBombSize;
+  if (distance_pixels < 0.0f) distance_pixels = 0.0f;
+  if (distance_pixels >= explode_pixels) return 0.0f;
+
+  return (explode_pixels - distance_pixels) / explode_pixels;
+}
+
+// Nearest future approach of a weapon to a player, in tiles. Negative when it is already moving
+// away, so callers can discard it.
+inline float GetClosestApproach(Player& self, Weapon& weapon) {
+  Vector2f delta = weapon.position - self.position;
+  Vector2f relative_velocity = weapon.velocity - self.velocity;
+
+  float speed_sq = relative_velocity.LengthSq();
+  if (speed_sq < 0.0001f) return delta.Length();
+
+  float t = -delta.Dot(relative_velocity) / speed_sq;
+  if (t < 0.0f) return -1.0f;
+
+  float remaining_seconds = TICK_DIFF(weapon.end_tick, GetCurrentTick()) / 100.0f;
+  if (remaining_seconds <= 0.0f) return -1.0f;
+  if (t > remaining_seconds) t = remaining_seconds;
+
+  return (delta + relative_velocity * t).Length();
+}
+
 // Scans nearby enemy weapons and estimates how much damage is on a collision course with self
 // within `check_distance`, along with the averaged origin/direction of the threat. Shared by
 // DodgeIncomingDamage (hard escape) and DodgeJukeNode (light nudge that keeps aim on target).
@@ -81,6 +121,17 @@ inline IncomingDamageReport GetIncomingDamage(behavior::ExecuteContext& ctx, Pla
       if (threat_percent < 0.0f) threat_percent = 0.0f;
 
       float damage = (float)GetEstimatedWeaponDamage(weapon, ctx.bot->game->connection) * threat_percent;
+
+      // Scale a blast weapon down by how far off-centre it will actually go off. GetEstimatedWeaponDamage
+      // reports the maximum a bomb can do, which is only right for a near-direct hit.
+      if (weapon.data.type == WeaponType::Bomb || weapon.data.type == WeaponType::ProximityBomb ||
+          weapon.data.type == WeaponType::Thor) {
+        float closest = GetClosestApproach(*self, weapon);
+        if (closest < 0.0f) continue;
+
+        damage *= GetBlastDamageFraction(ctx.bot->game->connection, weapon.data.level, closest);
+        if (damage <= 0.0f) continue;
+      }
       Vector2f weighted_direction = direction * threat_percent;
 
       // Reduce the effect of this direction if the damage is lower than average.

@@ -30,6 +30,7 @@
 #include <zero/zones/nexus/nodes/EngagementRangeNode.h>
 #include <zero/zones/nexus/nodes/BombBlastSafetyNode.h>
 #include <zero/zones/nexus/nodes/TeamCentroidNode.h>
+#include <zero/zones/nexus/nodes/IncomingBlastDamageNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
@@ -121,6 +122,21 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // by weapon*, firing bombs into an occupied lane less often than bullets, which is the behavior
   // this gate restores.
   constexpr float kBombFriendlyBlastMargin = 6.0f;
+
+  // Closing speed toward the target required before we'll fire a bomb. This used to be 2.0, which
+  // silently made bombing almost impossible: while orbiting, our velocity is tangential, so the
+  // component along the aim line sits near zero and the gate never opened. Together with a flat
+  // 12-tile minimum range that exactly matched the 12-tile orbit distance, it left the bot with
+  // almost no window in which it was allowed to bomb at all - in the 1-human-vs-7-bots replays the
+  // human fired 71 bombs while the bot he isolated fired 2.
+  //
+  // The requirement existed so the bomb would carry our forward momentum, but PredictiveAimNode now
+  // solves the lead in our own reference frame and accounts for ship velocity properly, so a
+  // tangential launch is aimed correctly rather than drifting. All that's left worth excluding is
+  // lobbing one while actively reversing away from the target. The 12-tile floor is dropped
+  // outright: BombBlastSafetyNode already keeps us outside our own blast using the real
+  // BombExplodePixels radius, which is what that number was standing in for.
+  constexpr float kBombMinForwardVelocity = 0.0f;
 
   // Don't take bullet shots past this. Two things made long-range fire actively wasteful rather
   // than merely low-value: the aim solver was under-leading (fixed in PredictiveAimNode), and
@@ -370,7 +386,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                 .Selector()
                     .Sequence() // Attempt to dodge and use defensive items.
                         .Sequence(CompositeDecorator::Success) // Always check incoming damage so we can use it in repel and portal sequences.
-                            .Child<IncomingDamageQueryNode>(kRepelDistance, "incoming_damage")
+                            .Child<IncomingBlastDamageNode>(kRepelDistance, "incoming_damage")  //Blast-falloff aware, so a bomb clipping our edge isn't scored as a lethal direct hit and doesn't burn a repel
                             .Child<PlayerCurrentEnergyQueryNode>("self_energy")
                             .End()
                         .Sequence(CompositeDecorator::Success) // If we are in danger but can't repel, use our portal.
@@ -495,7 +511,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Child<VectorSubtractNode>("bomb_aimshot", "self_position", "target_direction", true) //check target aim
                                 .Child<PlayerVelocityQueryNode>("self_velocity") // get our current velocity
                                 .Child<VectorDotNode>("self_velocity", "target_direction", "forward_velocity")  // compare our velocity to target
-                                .Child<ScalarThresholdNode<float>>("forward_velocity", 2.0f) // confirm velocity is sufficient
+                                .Child<ScalarThresholdNode<float>>("forward_velocity", kBombMinForwardVelocity) // don't lob one while actively backing away from the target
                                 .Child<PlayerEnergyPercentThresholdNode>(0.45f) // ensure we have enough energy to fire
                                 .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb) // ensure bombs are ready to fire
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb) // ensure bombs are off cooldown
@@ -503,7 +519,6 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Child<IncomingDamageQueryNode>("target", kRepelDistance * 2.5f, 2.75f, "outgoing_damage") // check outgoing damage to target
                                 .Child<ScalarThresholdNode<float>>("outgoing_damage", kBombRequiredDamageOverlap) // Check if we have enough bullets overlapping outgoing damage to fire a bomb into.
                                 .InvertChild<DistanceThresholdNode>("nearest_target_position", 50.0f)  //dont bomb from too far
-                                .Child<DistanceThresholdNode>("nearest_target_position", 12.0f)  //dont pb yourself (dont use target here in case a teammate is on top)
                                 .Child<BombBlastSafetyNode>("bomb_aimshot", kBombFriendlyBlastMargin)  //never bomb when the blast would catch us or a teammate - fall through to bullets instead
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity") // check bomb velocity
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray") // check collision ray
