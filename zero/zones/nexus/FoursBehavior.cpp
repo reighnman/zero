@@ -281,7 +281,10 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // enabled and the bot team's focus rate went *down* (52% against rec9's 61%), which is what that
   // looks like. The threshold has to be well inside normal fighting range to mean "on top of us"
   // rather than "engaged at all".
-  constexpr float kSelfDefenseDistance = 8.0f;
+  // Raised 8 -> 10 alongside the engagement distance going to 14.4: this has to mean "closer than we
+  // ever intend to be" relative to the pump's inner edge (10.4), not a fixed number. Too high and it
+  // fires every tick and disables team focus entirely, which is what 15 did originally.
+  constexpr float kSelfDefenseDistance = 10.0f;
 
   // Radius used for the local head-count that decides whether we're supported or outnumbered.
   // Matches the radius the replay analysis bucketed on, so the exchange table it came from applies.
@@ -329,6 +332,12 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   constexpr u32 kPressAdvantageTicks = 300;  // ~3s
 
   constexpr float kAvoidTeamDistance = 6.0f;
+
+  // Minimum spacing we insist on from *any* enemy, not just the one we're shooting. Set inside the
+  // inner edge of the engagement pump (kOrbitDistance - kPumpAmplitude = 10.4) so it only pushes
+  // back when someone is closer than we ever intend to be, rather than fighting normal station
+  // keeping. TwosBoxBehavior has carried this for a while; Fours never picked it up.
+  constexpr float kAvoidEnemyDistance = 10.0f;
 
   // How close a wall needs to be before we override movement to steer clear of it while fleeing.
   // How far ahead, in seconds of travel, to look for terrain we're about to run into. A fixed
@@ -446,6 +455,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                     .Sequence() 
                         .Child<NearestMemoryTargetNode>("target")
                         .Child<NearestMemoryTargetNode>("nearest_target") //Keep a handle on the genuinely nearest enemy - "target" gets overridden by the team focus and low-energy rules below, and the flee-side checks need the one actually on top of us
+                        .Child<PlayerEnergyQueryNode>("nearest_target", "nearest_target_energy") //Defensive decisions compare against whoever is actually on us, not whoever we've chosen to shoot
                         .Child<PlayerPositionQueryNode>("target", "target_position")
                         .Child<PlayerEnergyQueryNode>("target", "target_energy")
                         .Child<TargetAccelerationNode>("target", "target_acceleration")
@@ -532,7 +542,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .End()
                     .End()
                 .Sequence(CompositeDecorator::Success) // Continuously reassess fight-vs-flee using energy relative to the target, instead of a fixed timer.
-                    .Child<EnergyDisadvantageNode>("target", "target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent)
+                    .Child<EnergyDisadvantageNode>("nearest_target", "nearest_target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent) //Judge fight-vs-flee against the enemy actually on top of us. Comparing against the team focus target meant a bot could be losing badly to someone at 3 tiles while reporting no disadvantage because the far target it had chosen to shoot was weaker.
                     .Child<TimerSetNode>("recharge_timer", 200)
                     .End()
                 .Sequence(CompositeDecorator::Success) // Badly outnumbered - leave regardless of how the nearest duel happens to be going.
@@ -608,8 +618,10 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .End()
                     .Sequence() // Path to target if they aren't immediately visible.
                         .InvertChild<VisibilityQueryNode>("target_position")
+                        .Child<ScalarThresholdNode<float>>("local_advantage", 0.0f) //Never cross the map into a fight we're already losing. This branch pathfinds straight at the target and sits ahead of the orbit/regroup movement in this Selector, so without a head-count check it happily routed the bot through the middle of the enemy team to reach a focus target picked for being near the team centroid - which is exactly the 3-on-1 dive. Failing here falls through to the regroup below instead.
                         .Child<GoToNode>("target_position")
                         .Child<AvoidTeamNode>(kAvoidTeamDistance)
+                        .Child<AvoidEnemyNode>(kAvoidEnemyDistance) //Path around anyone we pass rather than straight over them
                         .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
                         .End()
                     .Sequence() // Aim at target and shoot while seeking them.
@@ -693,6 +705,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                             .End()
                                         .End()
                                     .Child<AvoidTeamNode>(kAvoidTeamDistance)
+                                    .Child<AvoidEnemyNode>(kAvoidEnemyDistance) //Don't let anyone sit on top of us regardless of who we've picked to shoot. Orbit distance is held to the *target*, so before this a second enemy could close to point blank and be ignored entirely while we kept station on someone else. Guarded by the "rushing" invert above, so it never fights a committed dive.
                                     .End()
                                 .End()
                             .Sequence(CompositeDecorator::Success) // Bomb fire check.
