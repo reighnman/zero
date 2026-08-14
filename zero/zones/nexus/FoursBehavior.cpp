@@ -44,6 +44,7 @@
 #include <zero/zones/nexus/nodes/EnergyDisadvantageNode.h>
 #include <zero/zones/nexus/nodes/TargetEnergyDropNode.h>
 #include <zero/zones/nexus/nodes/ShotLineOfSightNode.h>
+#include <zero/zones/nexus/nodes/TargetOpeningRangeNode.h>
 #include <zero/zones/nexus/nodes/FinishableTargetNode.h>
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
@@ -170,8 +171,20 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   constexpr float kRocketMinSelfEnergyPercent = 0.6f;
   // "Isolated" means nobody of theirs within this radius. The count includes the target itself, so
   // the gate fires only when the count is below 2.
-  constexpr float kRocketIsolationRadius = 20.0f;
+  // Widened from 20. "Isolated" has to mean isolated at the scale we're about to travel, and a
+  // rocket covers 16-35 tiles - an enemy 22 tiles from the target was well inside the dive and was
+  // being ignored.
+  constexpr float kRocketIsolationRadius = 30.0f;
   constexpr float kRocketMaxEnemiesNearTarget = 2.0f;
+  // The gate that distance and speed alone could never express: only rocket at something that is
+  // actually running away from us. A target holding station in its own team looks identical to a
+  // fleeing one under a distance check, and rocketing at it is precisely the dive-into-a-crowd
+  // behavior seen in play - we arrive at speed, in a group, with no thrust left to turn around.
+  constexpr float kRocketMinOpeningSpeed = 3.0f;
+  // Rockets also require a positive local head-count, not merely a non-negative one. At parity the
+  // exchange is roughly even and there's nothing a limited item buys; committing one only makes
+  // sense when we're up bodies and a kill actually converts into an advantage.
+  constexpr float kRocketMinAdvantage = 1.0f;  // ScalarThresholdNode compares >=, so this is "+1 or better"
 
   constexpr float kRocketChaseMinDistance = 16.0f;
   constexpr float kRocketChaseMaxDistance = 35.0f;
@@ -716,13 +729,15 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                         .Child<TargetEnergyPercentThresholdNode>("target", "target_energy", kRocketTargetEnergyPercent) // percent of the target's own max, not an absolute - a rocket is for finishing something already nearly dead
                                         .InvertChild<ScalarThresholdNode<float>>("enemies_near_target_wide", kRocketMaxEnemiesNearTarget) // and only if it's on its own - diving a target with friends around just delivers us into them
                                         .Child<TimerExpiredNode>("recharge_timer") // never light one while we're supposed to be breaking off
+                                        .Child<TargetOpeningRangeNode>("target", kRocketMinOpeningSpeed) // only chase something that is actually running. A target holding station in its own team reads identically to a fleeing one under a distance check, and rocketing at it is the dive-into-a-crowd behavior - we arrive fast, outnumbered, with no thrust left to turn around.
+                                        .Child<ScalarThresholdNode<float>>("local_advantage", kRocketMinAdvantage) // stricter than the rush around it: spend a limited item only when we're up bodies and the kill actually converts
                                         .InvertChild<RocketActiveQueryNode>() // don't stack one on top of a burn already running
                                         .Child<AtMaxSpeedNode>(kRocketMinSpeedPercent)
                                         .InvertChild<DistanceThresholdNode>("target_position", kRocketChaseMaxDistance)  //dont rocket if too far away
                                         .Child<DistanceThresholdNode>("target_position", kRocketChaseMinDistance)  //dont rocket if right on them you'll overshoot
                                         .Child<TimerExpiredNode>("rocket_timer") // check cooldown period
                                         .Child<InputActionNode>(InputAction::Rocket) // use rockets
-                                        .Child<TimerSetNode>("rocket_timer", 1500) // set a rocket cooldown period
+                                        .Child<TimerSetNode>("rocket_timer", 3000) // cooldown doubled from 1500 - even when every condition above holds, a second rocket 15s into the same engagement is almost always the tail of one commitment rather than a fresh decision
                                         .End()
                                     .Child<BlackboardEraseNode>("recharge_timer") // remove recharge status as we're going in for the kill
                                     .Child<BlackboardEraseNode>("orbit_direction") // pick a fresh orbit direction next time we're back to circling
