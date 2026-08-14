@@ -112,10 +112,24 @@ struct WallAvoidanceNode : public behavior::BehaviorNode {
     // against, while being wedged gets a force large enough to dominate whatever else is pushing.
     steering.force += escape * (cornered || scraping ? 1000.0f : 400.0f);
 
-    // Deliberately Failure - see the note at the top. We contribute force and let the movement node
-    // underneath us keep running, instead of replacing the bot's defense and offense with a wall
-    // reflex.
-    return behavior::ExecuteResult::Failure;
+    // Cornered is the one case that takes over. Everywhere else we contribute force and step aside
+    // (see the note at the top) so the retreat or orbit underneath keeps running and both forces
+    // sum - that is what stopped the bot refusing to fight near terrain.
+    //
+    // But summing is exactly wrong once we are actually in a pocket. FleeNode clamps a minimum
+    // component of its force along the away-from-threat axis so a retreat can never read as moving
+    // toward the threat, and when the threat sits between us and the only opening, that clamp is a
+    // guaranteed push into the wall we are trying to leave. The two forces then fight, we scrape
+    // along the terrain instead of escaping, and rec31 shows how that ends: bots died with a median
+    // of 2-5 tiles of clearance and hit walls 5.8-8.9 times a minute, against phong's 21 tiles and
+    // 2.5. Returning Success here makes the enclosing Selector skip the movement node for this tick,
+    // so the escape is unopposed.
+    //
+    // Safe to do only because `cornered` is a genuinely severe test - 11 of 16 directions blocked -
+    // and not the any-ray-hit trigger the original version used, which fired constantly in tight
+    // geometry and is what made taking over a mistake the first time. Firing is unaffected either
+    // way: the return-fire and aim-and-shoot blocks are siblings after this Selector, not inside it.
+    return cornered ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;
   }
 
   float wall_distance = 0.0f;
