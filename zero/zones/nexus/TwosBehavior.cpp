@@ -458,17 +458,28 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
   // (kBombRequiredDamageOverlap) and caps at 50 tiles, which is right for "put a bomb into a
   // firefight I am already in" and by construction never fires on the way in.
   //
-  // This one only ever spends SURPLUS. Above kLobBombMinEnergyPercent the recharge is topped out and
+  // This one only ever spends SURPLUS. At kLobBombMinEnergyPercent the recharge is topped out and
   // the energy has nowhere to go, so a bomb is close to free; below it, the bomb is competing with
-  // staying alive and this branch stops.
-  constexpr float kLobBombMinEnergyPercent = 0.85f;
-  // Starts outside the engagement band (kOrbitDistance 14.4 + pump) so this never competes with the
-  // close-range bomb check, and reaches out past the 45-tile approach it is meant for.
-  constexpr float kLobBombMinDistance = 25.0f;
-  constexpr float kLobBombMaxDistance = 60.0f;
+  // staying alive and this branch stops. Raised from 0.85 to mean genuinely FULL rather than merely
+  // healthy - 0.95 rather than 1.0 only because energy is sampled against a max that jitters, so an
+  // exact equality would fire far less often than intended.
+  constexpr float kLobBombMinEnergyPercent = 0.95f;
+  // Both bounds up 30%. This is specifically the long run back to a fight that is already happening
+  // somewhere else, not a ranged poke at whoever we are already circling: at 32 tiles we are well
+  // outside the engagement band (kOrbitDistance 14.4 plus pump) with a real approach still to make,
+  // and the far bound reaches most of the way across the map so a bot rejoining from a spawn or a
+  // long retreat is still contributing on the way in.
+  constexpr float kLobBombMinDistance = 32.5f;
+  constexpr float kLobBombMaxDistance = 78.0f;
   // Must actually be heading in. A bomb lobbed while drifting away arrives late and behind them,
   // and this is meant for the run back into a fight, not for kiting at range.
   constexpr float kLobBombMinClosingSpeed = 5.0f;
+  // And moving properly, not just nominally toward them. A projectile inherits ship velocity
+  // (WeaponManager.cpp:903), so at 80% of top speed pointed in, our own momentum is ADDED to the
+  // muzzle speed - the bomb flies faster and spends less time in the air, which is what makes a
+  // 30-78 tile lob land anywhere near where it was aimed. This is the exact inverse of the
+  // reverse-retreat bomb, which wants that same subtraction to leave the bomb hanging in place.
+  constexpr float kLobBombMinSpeedPercent = 0.8f;
   // Deliberately generous: at this range the shot is area denial into a group, not a duel with one
   // ship. Landing near the fight is the point, and the blast does the rest.
   constexpr float kLobBombProximityMultiplier = 14.0f;
@@ -1046,12 +1057,13 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
                                 .InvertChild<InputQueryNode>(InputAction::Bomb) // the close-range bomb check above already fired this tick
                                 .InvertChild<InputQueryNode>(InputAction::Thor)
                                 .Child<PlayerEnergyPercentThresholdNode>(kLobBombMinEnergyPercent) // surplus only
-                                .Child<DistanceThresholdNode>("target_position", "self_position", kLobBombMinDistance) // outside the engagement band, so this never overlaps the close-range check
-                                .InvertChild<DistanceThresholdNode>("target_position", "self_position", kLobBombMaxDistance)
+                                .Child<DistanceThresholdNode>("nearest_target_position", "self_position", kLobBombMinDistance) // Measured against the NEAREST enemy, not the focus target. TeamFocusTargetNode picks off the team centroid, so "target" is usually not the closest enemy - gating on it would happily lob at a distant group while someone sat on top of us, which is the exact posture this is supposed to replace. Nearest enemy 32+ tiles out is what actually means "approaching from a distance".
+                                .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", kLobBombMaxDistance)
                                 .Child<VectorSubtractNode>("bomb_aimshot", "self_position", "lob_target_direction", true)
                                 .Child<PlayerVelocityQueryNode>("self_velocity")
                                 .Child<VectorDotNode>("self_velocity", "lob_target_direction", "lob_forward_velocity") // recomputed rather than reusing the close-range block's value, which is stale whenever that block exited early
                                 .Child<ScalarThresholdNode<float>>("lob_forward_velocity", kLobBombMinClosingSpeed) // actually running back in, not drifting off
+                                .Child<AtMaxSpeedNode>(kLobBombMinSpeedPercent) // and at real speed, so our momentum adds to the muzzle velocity and the bomb actually gets there
                                 .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb)
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
                                 .Child<TimerExpiredNode>("lob_bomb_timer")
