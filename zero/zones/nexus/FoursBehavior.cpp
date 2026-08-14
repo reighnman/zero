@@ -155,7 +155,23 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // A rocket is a short burst of extra thrust and a raised speed cap. It only converts into real
   // distance if we're already near our normal top speed - lit from slow, most of the burn is spent
   // reaching a speed we'd have reached anyway, and while chasing it also risks sailing straight past
-  // the target. So both uses below require us to already be moving.
+  // the target. So the chase gate below requires us to already be moving.
+  //
+  // There is only ONE use of a rocket now: chasing down a target we have already judged finishable.
+  // The escape rocket is deliberately gone, and this is worth stating so it isn't re-added as an
+  // obvious-looking improvement. Lighting a rocket to break contact was self-defeating in a way the
+  // gate could not fix, because the problem was not WHEN it fired but what firing it did to us:
+  //   - It doubled our speed pointed away from the fight, so by the time the burn ended we were far
+  //     enough out that the trip back arrived alone and late - and isolation has predicted deaths in
+  //     every recording of this branch so far.
+  //   - It spent the item we needed for the offensive gate, so the escape and the kill competed for
+  //     the same resource and the escape, being unconditional on target state, always won first.
+  //   - It needed a hold block (the burn had to be seen through, since nothing is worth turning back
+  //     into at that speed) whose whole job was to suppress the rest of the tree. That block was the
+  //     suspected path by which a defensive burn leaked back into offense mid-flight, and deleting
+  //     the burn deletes the leak rather than adding a fifth condition to catch it.
+  // Breaking contact is FleeNode's job, and FleeDistanceNode already scales how far we go by how
+  // badly we're hurt. Ordinary reverse thrust gets us there under control and with the item intact.
   constexpr float kRocketMinSpeedPercent = 0.8f;
   // Chasing: only worth it if there's a real gap to close. Raised from 12 after the first live test
   // came out visibly rocket-happy - at that range we were spending a limited item to cover ground
@@ -199,8 +215,6 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
 
   constexpr float kRocketChaseMinDistance = 16.0f;
   constexpr float kRocketChaseMaxDistance = 35.0f;
-  // Escaping: only once whoever is chasing is genuinely running us down, not merely following.
-  constexpr float kRocketEscapeDistance = 12.0f;
 
   // --- Mines ---
   // Measured off the human in the bot-vs-human replays: he laid exactly one mine per match, both
@@ -676,18 +690,6 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .End()
                     .Child<BlackboardEraseNode>("finishing")
                     .End()
-                .Sequence(CompositeDecorator::Success) // A rocket lit to escape has to be seen through to the end of its burn.
-                    .Child<BlackboardSetQueryNode>("rocket_defensive")
-                    .Selector()
-                        .Sequence() // Still burning - stay committed to the retreat, whatever else the tree decided this tick.
-                            .Child<RocketActiveQueryNode>()
-                            .Child<TimerSetNode>("recharge_timer", 200)
-                            .Child<BlackboardEraseNode>("finishing") //Nothing is worth turning back into at the speed a rocket carries
-                            .Child<BlackboardEraseNode>("rushing")
-                            .End()
-                        .Child<BlackboardEraseNode>("rocket_defensive") //Burn finished, free to fight again
-                        .End()
-                    .End()
                 .Selector()
                     .Sequence() // Attempt to dodge and use defensive items.
                         .Sequence(CompositeDecorator::Success) // Always check incoming damage so we can use it in repel and portal sequences.
@@ -735,16 +737,6 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                             .Child<MineAvailableNode>()
                             .Child<InputActionNode>(InputAction::Mine)
                             .Child<TimerSetNode>("mine_timer", 500)
-                            .End()
-                        .Sequence(CompositeDecorator::Success) // Rocket clear when someone is closing on us and we're already at running speed.
-                            .Child<ShipItemCountThresholdNode>(ShipItemType::Rocket)
-                            .InvertChild<RocketActiveQueryNode>()
-                            .Child<AtMaxSpeedNode>(kRocketMinSpeedPercent)
-                            .InvertChild<DistanceThresholdNode>("target_position", "self_position", kRocketEscapeDistance)
-                            .Child<TimerExpiredNode>("rocket_timer")
-                            .Child<InputActionNode>(InputAction::Rocket)
-                            .Child<TimerSetNode>("rocket_timer", 1500)
-                            .Child<ScalarNode>(1.0f, "rocket_defensive")  //Mark this burn as an escape, so the retreat is held for its whole duration - see the hold block above the fight/flee Selector
                             .End()
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "team_centroid") //Additive now - returns Failure so the flee below still runs and both forces sum
@@ -804,7 +796,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                     .InvertChild<DistanceThresholdNode>("target_position", "self_position", kRushDistanceThreshold)
                                     .InvertChild<ScalarThresholdNode<float>>("target_energy", kLowEnergyRushThreshold)
                                     .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
-                                    .Child<ScalarNode>(1.0f, "rushing") // set rushing status 
+                                    .Child<ScalarNode>(1.0f, "rushing") // set rushing status
                                     .Sequence(CompositeDecorator::Success) //Rocket down a fleeing kill, but only once we're already moving - lit from slow it mostly buys back speed we'd have reached anyway, and it overshoots.
                                         .Child<ShipItemCountThresholdNode>(ShipItemType::Rocket) // check we have rocket items
                                         .Child<PlayerEnergyPercentThresholdNode>(kRocketMinSelfEnergyPercent) // only commit a limited item while we can still afford the dive
