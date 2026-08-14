@@ -44,7 +44,6 @@
 #include <zero/zones/nexus/nodes/EnergyDisadvantageNode.h>
 #include <zero/zones/nexus/nodes/TargetEnergyDropNode.h>
 #include <zero/zones/nexus/nodes/ShotLineOfSightNode.h>
-#include <zero/zones/nexus/nodes/BombImpactLikelihoodNode.h>
 #include <zero/zones/nexus/nodes/TargetOpeningRangeNode.h>
 #include <zero/zones/nexus/nodes/FinishableTargetNode.h>
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
@@ -303,38 +302,13 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // so bombs land as area denial off a near miss instead of needing a precise direct hit, like
   // lobbing them into blast range instead of sniping with them.
   //
-  // This is now only the coarse geometry filter. It is deliberately range-blind - an 8x box is as
-  // easy to clip at 30 tiles as at 10 - which is why bomb hit rate sat flat and low (8-21%) instead
-  // of falling off with range the way it physically must. BombImpactLikelihoodNode does the real
-  // work now; this just cheaply rejects shots pointed nowhere near the target.
+  // This being range-blind is the point, not a defect. A dodge-likelihood gate was tried on top of
+  // it (BombImpactLikelihoodNode, since removed) on the theory that a bomb the target can simply
+  // thrust clear of is a wasted bomb. The physics was right and the conclusion was wrong: bombs
+  // here are area denial and cover fire, so one that merely forces a dodge has already done its
+  // job, and gating on expected direct hits cut bomb volume to almost nothing. Accuracy is not the
+  // metric a cover-fire weapon should be tuned on.
   constexpr float kBombProximityMultiplier = 8.0f;
-
-  // How much of the proximity-fuse radius the target is allowed to be able to escape during the
-  // bomb's flight. 1.0 means "they can just barely slip it"; below 1.0 demands margin.
-  //
-  // Raised from 1.0 after rec23, where the gate at 1.0 was far tighter than estimated: bots fired a
-  // combined EIGHT bombs in the whole match against the human's 42, and the ones they did fire went
-  // out at 8.2-12.4 tiles, i.e. right at the gate's ceiling rather than anywhere they chose.
-  //
-  // The real arena settings put the model's cutoff near 12 tiles, not the 13-25 estimated. That
-  // collided with the *other* end of the range, which BombBlastSafetyNode bounds at
-  // blast_radius + kBombFriendlyBlastMargin so we don't eat our own blast. The two gates left a
-  // window a couple of tiles wide. Neither looked wrong alone.
-  //
-  // 3.0 widens the model's reach by sqrt(3) ~ 1.7x, to roughly 20-21 tiles on top of the empirical
-  // floor below. Deliberately expressed as a tolerance rather than a range cap so it still scales
-  // with the ship's actual bomb speed and the target's actual thrust.
-  constexpr float kBombImpactTolerance = 3.0f;
-
-  // Below this range the dodge model is not consulted at all. It estimates a worst-case optimal
-  // dodge - instant reaction, full MaximumThrust, best direction - and real targets measurably do
-  // not manage that: bombs land 13-21% of the time at ranges the model calls hopeless, and the
-  // human bombs at a median 23.8 tiles for 21.4%. Where measurement and a deliberately pessimistic
-  // model disagree inside the measured band, measurement wins.
-  //
-  // This is also the guarantee that the rec23 collapse cannot recur regardless of arena settings:
-  // bombing is available across a real window no matter what the model computes.
-  constexpr float kBombAlwaysAllowRange = 22.0f;
 
   // Burst-fire pacing (a 0.3s firing window followed by a forced ~1s pause) used to live here and
   // has been removed, because the corpus says it was modelling a habit that doesn't exist and
@@ -829,7 +803,6 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                                 .InvertChild<DistanceThresholdNode>("nearest_target_position", 50.0f)  //dont bomb from too far
                                 .Child<BombBlastSafetyNode>("bomb_aimshot", kBombFriendlyBlastMargin)  //never bomb when the blast would catch us or a teammate - fall through to bullets instead
                                 .Child<ShotLineOfSightNode>("bomb_aimshot")  //Hard gate: bombs don't pass through walls, and a bomb detonating on terrain we're stood near is the self-blast case we already try to avoid. No bounce allowance - BombBounceCount is commonly 0 and a bounced bomb does reduced damage anyway.
-                                .Child<BombImpactLikelihoodNode>("target", "bomb_aimshot", kBombImpactTolerance, kBombAlwaysAllowRange)  //Will this bomb actually arrive while they're still there? Compares how far the target can thrust clear during the bomb's flight against the proximity radius, with an empirical floor inside which the model isn't consulted. Self-tuning by range: evasion grows with flight time squared, so this tightens with distance on its own where the old 8x bounding box was equally easy to clip at 30 tiles as at 10.
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity") // check bomb velocity
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray") // check collision ray
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", kBombProximityMultiplier) // lob range, not a precise hit
