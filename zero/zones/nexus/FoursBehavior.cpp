@@ -206,6 +206,17 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // fighting normally.
   constexpr float kTeamCohesionRange = 30.0f;
 
+  // How far a retreat is allowed to bend toward the team instead of running dead away from the
+  // chaser. Bots were ending a sustained retreat a median 3-7 tiles further from their nearest
+  // teammate than they started it, over 33-62 retreats a match, which is precisely how they arrive
+  // at the isolated 1-vs-2 that every death in these matches turns out to be. The human ends his
+  // retreats at +1.4 tiles and points them far less away from his own side (median 84 degrees off
+  // the bearing to it, against the bots' 101-140).
+  //
+  // 60 degrees still opens range - just on an arc back toward support rather than a straight line
+  // into an empty corner of the map.
+  constexpr float kFleeTeamBiasRadians = 1.05f;  // ~60 degrees
+
   constexpr float kLeashDistance = 30.0f;
 
   // Once within this distance of the target, stop closing further and circle instead - close
@@ -220,7 +231,14 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // An enemy inside this range is our problem regardless of what the rest of the team is doing -
   // we can't ignore someone shooting us in the face to go help elsewhere. Outside it, defer to the
   // team's focus target so four bots stop splitting into four separate duels.
-  constexpr float kSelfDefenseDistance = 15.0f;
+  //
+  // This was 15, which quietly disabled the whole team-focus override: we orbit at kOrbitDistance
+  // (12) with a +/-4 pump, so the engaged target is almost always inside 15 tiles and the
+  // self-defense exception fired essentially every tick. rec10 was the first match with team focus
+  // enabled and the bot team's focus rate went *down* (52% against rec9's 61%), which is what that
+  // looks like. The threshold has to be well inside normal fighting range to mean "on top of us"
+  // rather than "engaged at all".
+  constexpr float kSelfDefenseDistance = 8.0f;
 
   // Radius used for the local head-count that decides whether we're supported or outnumbered.
   // Matches the radius the replay analysis bucketed on, so the exchange table it came from applies.
@@ -434,6 +452,10 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                     .Child<LocalAdvantageNode>(kLocalAdvantageRadius, "local_advantage")
                     .Child<EngagementRangeNode>("local_advantage", "engagement_range", kOrbitDistance, kOutnumberedDistance, kPumpAmplitude, kPumpHalfPeriodTicks)
                     .Child<EnemiesNearTargetNode>("target", kMultifireClusterRadius, "enemies_near_target") //Drives the multifire toggle below
+                    .Selector(CompositeDecorator::Success) // Keep the team's centre of mass fresh for the flee bias below - or clear it outright if we're the last one alive, so we don't retreat toward a dead teammate's last position.
+                        .Child<TeamCentroidNode>("team_centroid")
+                        .Child<BlackboardEraseNode>("team_centroid")
+                        .End()
                     .End()
                 .Sequence(CompositeDecorator::Success) // Continuously reassess fight-vs-flee using energy relative to the target, instead of a fixed timer.
                     .Child<EnergyDisadvantageNode>("target", "target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent)
@@ -495,7 +517,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                             .End()
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
-                            .Child<FleeNode>("nearest_aimshot", kLeashDistance, 5.0f, 0.2f, "target_energy")
+                            .Child<FleeNode>("nearest_aimshot", kLeashDistance, 5.0f, 0.2f, "target_energy", "team_centroid", kFleeTeamBiasRadians)
                             .End()
                         .End()
                     .Sequence() // Path to target if they aren't immediately visible.

@@ -46,21 +46,74 @@ namespace nexus {
 // rather than the one we're fighting. Still having more energy than that target overrides the
 // low-energy panic entirely: the fight itself is still winnable, so breaking off to run from a
 // closer, unrelated threat would be throwing away an advantage for no reason.
+// `team_position_key`, if given, curves the retreat back toward that position (the team's centre of
+// mass) instead of running dead away from the threat. Retreating along the pure away-vector is what
+// converts a fight the bot is losing into the isolation that actually kills it: measured over the
+// bot-vs-human replays, a bot ends a sustained retreat a median 3-7 tiles further from its nearest
+// teammate than it started, across 33-62 retreats a match, while the human ends his at +1.4. His
+// retreats also point much less away from his own team (median 84 degrees off the bearing to it,
+// against the bots' 101-140).
+//
+// The bias is capped at `max_team_bias_radians` off the away-vector so the retreat never turns back
+// into the threat - at 60 degrees we still open range at half rate while arcing toward support,
+// which is the "slowly path back to the team" shape rather than a straight line either way.
 struct FleeNode : public behavior::BehaviorNode {
   FleeNode(const char* position_key, float target_distance, float max_overshoot = 5.0f,
-           float low_energy_percent = 0.2f, const char* pressing_target_energy_key = nullptr)
+           float low_energy_percent = 0.2f, const char* pressing_target_energy_key = nullptr,
+           const char* team_position_key = nullptr, float max_team_bias_radians = 1.05f)
       : position_key(position_key),
         target_distance(target_distance),
         max_overshoot(max_overshoot),
         low_energy_percent(low_energy_percent),
-        pressing_target_energy_key(pressing_target_energy_key) {}
+        pressing_target_energy_key(pressing_target_energy_key),
+        team_position_key(team_position_key),
+        max_team_bias_radians(max_team_bias_radians) {}
   FleeNode(const char* position_key, const char* target_distance_key, float max_overshoot = 5.0f,
-           float low_energy_percent = 0.2f, const char* pressing_target_energy_key = nullptr)
+           float low_energy_percent = 0.2f, const char* pressing_target_energy_key = nullptr,
+           const char* team_position_key = nullptr, float max_team_bias_radians = 1.05f)
       : position_key(position_key),
         target_distance_key(target_distance_key),
         max_overshoot(max_overshoot),
         low_energy_percent(low_energy_percent),
-        pressing_target_energy_key(pressing_target_energy_key) {}
+        pressing_target_energy_key(pressing_target_energy_key),
+        team_position_key(team_position_key),
+        max_team_bias_radians(max_team_bias_radians) {}
+
+  // Straight away from the threat, rotated toward the team's centre of mass by at most
+  // `max_team_bias_radians`. The cap is what keeps this a retreat: staying within 60 degrees of the
+  // away-vector still opens range, it just does so on an arc that ends up back with the team
+  // instead of alone in a corner of the map.
+  Vector2f GetRetreatDirection(behavior::ExecuteContext& ctx, Player& self, const Vector2f& threat_position) {
+    Vector2f away = Normalize(self.position - threat_position);
+
+    if (!team_position_key) return away;
+
+    auto opt_team = ctx.blackboard.Value<Vector2f>(team_position_key);
+    if (!opt_team.has_value()) return away;
+
+    Vector2f to_team = *opt_team - self.position;
+    if (to_team.LengthSq() < 1.0f) return away;
+
+    to_team = Normalize(to_team);
+
+    float cos_angle = away.Dot(to_team);
+    if (cos_angle > 1.0f) cos_angle = 1.0f;
+    if (cos_angle < -1.0f) cos_angle = -1.0f;
+
+    float angle = acosf(cos_angle);
+    if (angle <= 0.0001f) return away;
+
+    float rotation = angle < max_team_bias_radians ? angle : max_team_bias_radians;
+
+    // Rotate toward the team, whichever way round that is.
+    float cross = away.x * to_team.y - away.y * to_team.x;
+    if (cross < 0.0f) rotation = -rotation;
+
+    float cos_r = cosf(rotation);
+    float sin_r = sinf(rotation);
+
+    return Vector2f(away.x * cos_r - away.y * sin_r, away.x * sin_r + away.y * cos_r);
+  }
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -86,6 +139,9 @@ struct FleeNode : public behavior::BehaviorNode {
     float distance_sq = to_threat.LengthSq();
     float max_distance = distance + max_overshoot;
 
+    // Which way "away" actually means - straight back from the threat, or arced toward our team.
+    Vector2f retreat_direction = GetRetreatDirection(ctx, *self, threat_position);
+
     // Below this energy, there's no leash to settle for - just keep opening distance. Unless
     // we're still ahead of the target we're actually pressing, in which case the fight is still
     // worth finishing rather than breaking off for an unrelated nearby threat.
@@ -102,7 +158,7 @@ struct FleeNode : public behavior::BehaviorNode {
     if (!panicking && distance_sq > max_distance * max_distance) {
       // Drifted past the leash margin on momentum alone - pull back in toward the standoff point
       // instead of continuing to hold broadside and coast further away.
-      Vector2f standoff_point = threat_position + Normalize(self->position - threat_position) * distance;
+      Vector2f standoff_point = threat_position + retreat_direction * distance;
 
       steering.Face(game, threat_position);
       steering.Seek(game, standoff_point);
@@ -132,10 +188,12 @@ struct FleeNode : public behavior::BehaviorNode {
       // Seek's 3-arg overload switches to closing back in once past `distance`, which is exactly
       // wrong while panicking - seek an away point instead, so it keeps opening distance no matter
       // how far out that goes.
-      Vector2f away_direction = Normalize(self->position - threat_position);
-      steering.Seek(game, self->position + away_direction * 1000.0f);
+      steering.Seek(game, self->position + retreat_direction * 1000.0f);
     } else {
-      steering.Seek(game, threat_position, distance);
+      // Equivalent to Seek(game, threat_position, distance) - which resolves to the point at
+      // `distance` from the threat on our side - except that the side is the biased retreat
+      // direction rather than dead away.
+      steering.Seek(game, threat_position + retreat_direction * distance);
     }
 
     steering.AvoidWalls(game);
@@ -159,9 +217,11 @@ struct FleeNode : public behavior::BehaviorNode {
   const char* position_key = nullptr;
   const char* target_distance_key = nullptr;
   const char* pressing_target_energy_key = nullptr;
+  const char* team_position_key = nullptr;
   float target_distance = 0.0f;
   float max_overshoot = 5.0f;
   float low_energy_percent = 0.2f;
+  float max_team_bias_radians = 1.05f;
 
  private:
   // Minimum backward-facing force to guarantee during active retreat, so Actuator can never read
