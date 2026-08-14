@@ -19,6 +19,8 @@
 #include <zero/zones/svs/nodes/MemoryTargetNode.h>
 #include <zero/zones/nexus/nodes/FleeNode.h>
 #include <zero/zones/nexus/nodes/FleeDistanceNode.h>
+#include <zero/zones/nexus/nodes/PursuedFromBehindNode.h>
+#include <zero/zones/nexus/nodes/SlowBombNode.h>
 #include <zero/zones/nexus/nodes/OrbitNode.h>
 #include <zero/zones/nexus/nodes/EngagementPump.h>
 #include <zero/zones/nexus/nodes/BroadsideFaceNode.h>
@@ -181,6 +183,22 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   // recharging against.
   constexpr float kRetreatRecoveryEnergyPercent = 0.5f;
 
+  // --- Reverse-retreat bomb ---
+  // A bomb fired while backing away nose-on inherits our velocity and subtracts it from the muzzle
+  // speed, so it barely travels and sits in the chaser's path like a mine. See SlowBombNode. This
+  // is the only wake weapon a duel has - the arena is no-items, so there are no actual mines - and
+  // it matters more here than in the team trees, since the one opponent chasing us is by definition
+  // the only threat there is.
+  constexpr float kReverseBombMaxGroundSpeed = 4.0f;
+  constexpr float kReverseBombRearConeDegrees = 120.0f;
+  constexpr float kReverseBombClosingSpeed = 9.0f;
+  constexpr float kReverseBombMinDistance = 7.0f;
+  constexpr float kReverseBombMaxDistance = 20.0f;
+  // Bombs are expensive (BombFireEnergy is a large fraction of max) and this fires exactly when
+  // we're hurt and running, so keep it out of the critical band we're retreating to escape.
+  constexpr float kReverseBombMinEnergyPercent = 0.35f;
+  constexpr u32 kReverseBombCooldownTicks = 150;
+
   // Hard floor on engaging at all, and the single exemption to it: a fight we can end this second.
   constexpr float kEngageFloorEnergyPercent = 0.15f;
   constexpr float kFinishRelativeEnergyPercent = 0.5f;
@@ -286,6 +304,18 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                     .Sequence()  //Keep distance while recharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
                         .Child<BlackboardEraseNode>("rushing") //We're breaking off, so we are no longer pressing. Without this "rushing" is only cleared inside the aim-and-shoot Parallel below, which this branch skips entirely.
+                        .Sequence(CompositeDecorator::Success) // Bomb the chaser while backing away. Nose-on in reverse the bomb sheds its muzzle speed against our own and hangs in their path like a mine - see SlowBombNode. Duel has no items, so this is the only wake weapon available here.
+                            .Child<PlayerEnergyPercentThresholdNode>(kReverseBombMinEnergyPercent)
+                            .Child<PursuedFromBehindNode>("nearest_target", kReverseBombRearConeDegrees, kReverseBombClosingSpeed)
+                            .Child<SlowBombNode>(kReverseBombMaxGroundSpeed) //Gates on the RESULT - if the shot would leave at speed (nose not really back at them, or FleeNode holding broadside) this fails and we don't throw a bomb away
+                            .Child<DistanceThresholdNode>("nearest_target_position", "self_position", kReverseBombMinDistance)
+                            .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", kReverseBombMaxDistance)
+                            .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
+                            .Child<TimerExpiredNode>("reverse_bomb_timer")
+                            .InvertChild<TileQueryNode>(kTileIdSafe)
+                            .Child<InputActionNode>(InputAction::Bomb)
+                            .Child<TimerSetNode>("reverse_bomb_timer", kReverseBombCooldownTicks)
+                            .End()
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds) //No team centroid to bias toward in a duel, so the escape direction is chosen purely on openness
                             .Child<FleeNode>("nearest_aimshot", "flee_distance", 5.0f, kFleePanicEnergyPercent, "nearest_target_energy") //Distance scales with injury instead of being a fixed leash, and the panic threshold is raised - see FleeDistanceNode
