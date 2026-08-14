@@ -337,7 +337,24 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   constexpr float kEnergyDisadvantageExitRatio = 0.9f;
   // Always treat energy this low as a disadvantage regardless of the target's energy, since being
   // critically low is dangerous even against an equally weak target.
-  constexpr float kCriticalEnergyPercent = 0.094f;
+  // Raised from 0.094. Bots were dying at 7.9-15.3% energy while the human died at 2.9%, so a floor
+  // at 9.4% was firing only once escape was no longer possible - by then a single bomb finishes you
+  // and the retreat has nowhere to go. Leaving at 25% is what buys enough margin to actually get
+  // out. This is the most likely constant here to need softening if bots turn out too skittish.
+  constexpr float kCriticalEnergyPercent = 0.25f;
+
+  // EnergyDisadvantageNode only ever compares us to the *current target's* energy, so it has no
+  // notion of being outnumbered: in a 3v1 where the nearest enemy happens to be the hurt one, it
+  // reports no disadvantage at all and the bot keeps fighting. That is the gap these two rules
+  // close, and it is the one the replays point straight at - in rec15 Lalita spent 98.7% of her
+  // hurt-and-close time outnumbered, retreated in only 45% of it, and died at 14.5% energy against
+  // a -2 head-count. Bots overall spent about twice as long as the human in that state (27.7s and
+  // 35.6s against his 15.5s) while retreating far less of it (38-68% against his 77.8%).
+  //
+  // At -2 or worse the exchange is a loss at every range (ratio 0.57-0.68 in the corpus table), so
+  // that case leaves unconditionally. At -1 it's only worth breaking off if we're also not healthy.
+  constexpr float kBadlyOutnumberedAdvantage = -1.0f;  // InvertChild fires below this, i.e. -2 or worse
+  constexpr float kOutnumberedRetreatEnergy = 0.6f;
 
   //.Child<ReadConfigIntNode<u16>>("queue_command1", "command1")
   //.Child<ReadConfigIntNode<u16>>("queue_command2", "command2")
@@ -490,6 +507,15 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                     .End()
                 .Sequence(CompositeDecorator::Success) // Continuously reassess fight-vs-flee using energy relative to the target, instead of a fixed timer.
                     .Child<EnergyDisadvantageNode>("target", "target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent)
+                    .Child<TimerSetNode>("recharge_timer", 200)
+                    .End()
+                .Sequence(CompositeDecorator::Success) // Badly outnumbered - leave regardless of how the nearest duel happens to be going.
+                    .InvertChild<ScalarThresholdNode<float>>("local_advantage", kBadlyOutnumberedAdvantage)
+                    .Child<TimerSetNode>("recharge_timer", 200)
+                    .End()
+                .Sequence(CompositeDecorator::Success) // Down bodies and not healthy - stop trading and get out.
+                    .InvertChild<ScalarThresholdNode<float>>("local_advantage", 0.0f)
+                    .InvertChild<PlayerEnergyPercentThresholdNode>(kOutnumberedRetreatEnergy)
                     .Child<TimerSetNode>("recharge_timer", 200)
                     .End()
                 .Selector()
