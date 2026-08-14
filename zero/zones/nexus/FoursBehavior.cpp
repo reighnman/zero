@@ -43,6 +43,7 @@
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
 #include <zero/zones/nexus/nodes/EnergyDisadvantageNode.h>
 #include <zero/zones/nexus/nodes/TargetEnergyDropNode.h>
+#include <zero/zones/nexus/nodes/ShotLineOfSightNode.h>
 #include <zero/zones/nexus/nodes/FinishableTargetNode.h>
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
@@ -220,6 +221,13 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
 
   //  If an enemy is near us and we're low energy thor if below this value
   constexpr float kThorEnemyThreshold = 200.0f;
+
+  // How close a target has to be before we'll take a bullet shot whose direct lane is blocked by
+  // terrain, betting on a bounce. Bullets bounce in this arena, so a blocked lane isn't automatically
+  // a wasted shot - but a ricochet only has a real chance while the geometry is tight and the
+  // remaining travel is short, so this sits just outside the engagement pump's inner edge (10.4).
+  // Bombs get no equivalent allowance; see ShotLineOfSightNode.
+  constexpr float kBulletBounceRange = 12.0f;
 
   // How far away from a teammate before we regroup (attach-to-safe-teammate check only).
   constexpr float kTeamRange = 40.0f;
@@ -666,6 +674,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                             .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "nearest_target_bounds", 4.0f)
                             .Child<MoveRectangleNode>("nearest_target_bounds", "nearest_aimshot", "nearest_target_bounds")
                             .Child<RayRectangleInterceptNode>("bullet_fire_ray", "nearest_target_bounds")
+                            .Child<ShotLineOfSightNode>("nearest_aimshot", kBulletBounceRange)  //Same terrain gate as the main fire check - retreating is when we're most likely to have terrain between us and whoever is chasing
                             .Child<InputActionNode>(InputAction::Bullet)
                             .End()
                         .End()
@@ -787,6 +796,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Child<ScalarThresholdNode<float>>("outgoing_damage", kBombRequiredDamageOverlap) // Check if we have enough bullets overlapping outgoing damage to fire a bomb into.
                                 .InvertChild<DistanceThresholdNode>("nearest_target_position", 50.0f)  //dont bomb from too far
                                 .Child<BombBlastSafetyNode>("bomb_aimshot", kBombFriendlyBlastMargin)  //never bomb when the blast would catch us or a teammate - fall through to bullets instead
+                                .Child<ShotLineOfSightNode>("bomb_aimshot")  //Hard gate: bombs don't pass through walls, and a bomb detonating on terrain we're stood near is the self-blast case we already try to avoid. No bounce allowance - BombBounceCount is commonly 0 and a bounced bomb does reduced damage anyway.
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity") // check bomb velocity
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray") // check collision ray
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", kBombProximityMultiplier) // lob range, not a precise hit
@@ -833,6 +843,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RayRectangleInterceptNode>("bullet_fire_ray", "target_bounds")
+                                .Child<ShotLineOfSightNode>("aimshot", kBulletBounceRange)  //The intercept test above knows nothing about terrain, so a target behind a wall still produces a valid-looking shot. Bounce allowance kept for tight corners.
                                 .Child<InputActionNode>(InputAction::Bullet)
                                 .End()
                             .End()
