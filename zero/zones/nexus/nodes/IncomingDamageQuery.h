@@ -13,6 +13,24 @@ struct IncomingDamageReport {
   Vector2f average_origin;
   float average_damage;
   u32 weapon_count;
+
+  // How much the incoming threats actually AGREE on a direction. This is the resultant length of
+  // the unit travel vectors (a circular mean): 1.0 when every weapon comes from the same bearing,
+  // 0.0 when they perfectly oppose each other.
+  //
+  // It exists because averaging is only meaningful when there is a consensus to average. A mine on
+  // one side and a bomb on the other produce near-opposite direction vectors that cancel, leaving
+  // average_direction a residue of floating point noise - which then normalizes to an essentially
+  // random unit vector, and average_origin lands midway between the two threats where nothing
+  // actually is. Every consumer downstream is then steering off a number that means nothing and
+  // re-rolls every tick.
+  float direction_coherence;
+
+  // Bearing from self to the single highest-damage threat, and that threat's damage. When the
+  // average is incoherent this is the only thing left worth steering by - see DodgeIncomingDamage,
+  // which slips perpendicular to it rather than trying to run from a consensus that does not exist.
+  Vector2f strongest_bearing;
+  float strongest_damage;
 };
 
 // Fraction of a blast weapon's maximum damage we would actually take if it went off at
@@ -70,6 +88,13 @@ inline IncomingDamageReport GetIncomingDamage(behavior::ExecuteContext& ctx, Pla
   Vector2f average_origin;
   float average_damage = 0.0f;
   size_t incoming_count = 0;
+
+  // Unweighted sum of unit travel directions, for the coherence measure. Deliberately unweighted:
+  // the question is "do these threats point the same way", which is about geometry, not about how
+  // hard each one hits.
+  Vector2f unit_direction_sum;
+  Vector2f strongest_bearing;
+  float strongest_damage = 0.0f;
 
   auto& weapon_man = ctx.bot->game->weapon_manager;
   for (size_t i = 0; i < weapon_man.weapon_count; ++i) {
@@ -167,6 +192,19 @@ inline IncomingDamageReport GetIncomingDamage(behavior::ExecuteContext& ctx, Pla
           (weighted_direction + (float)incoming_count * average_direction) / ((float)incoming_count + 1);
       average_origin = (weapon.position + (float)incoming_count * average_origin) / ((float)incoming_count + 1);
       average_damage = (damage + (float)incoming_count * average_damage) / ((float)incoming_count + 1);
+
+      unit_direction_sum += direction;
+
+      if (damage > strongest_damage) {
+        strongest_damage = damage;
+
+        // Bearing to the threat itself, not its travel direction. A mine has no meaningful travel
+        // direction at all (it is stationary, so its relative velocity is just ours reversed), and
+        // for anything else "which side is it on" is what a sidestep needs to know.
+        Vector2f to_weapon = weapon.position - self->position;
+        if (to_weapon.LengthSq() > 0.0001f) strongest_bearing = Normalize(to_weapon);
+      }
+
       ++incoming_count;
     }
   }
@@ -178,6 +216,9 @@ inline IncomingDamageReport GetIncomingDamage(behavior::ExecuteContext& ctx, Pla
   report.average_direction = average_direction;
   report.average_origin = average_origin;
   report.weapon_count = (u32)incoming_count;
+  report.strongest_bearing = strongest_bearing;
+  report.strongest_damage = strongest_damage;
+  report.direction_coherence = incoming_count > 0 ? unit_direction_sum.Length() / (float)incoming_count : 0.0f;
 
   return report;
 }

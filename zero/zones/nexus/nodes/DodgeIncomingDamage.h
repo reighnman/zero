@@ -86,7 +86,36 @@ struct DodgeIncomingDamage : public behavior::BehaviorNode {
     Vector2f offset = self->position - closest_hit;
     Vector2f side;
 
-    if (offset.LengthSq() > kMinOffsetSq) {
+    // Threats that disagree about where they are coming from cannot be averaged, and this is the
+    // second distinct way this node used to lock up. The head-on case above is one shot whose line
+    // runs through us; THIS is several shots pointing opposite ways - the reported case being a mine
+    // on one side and a bomb on the other.
+    //
+    // Their direction vectors cancel, so average_direction is left holding floating point residue
+    // that normalizes to an essentially random unit vector, and average_origin lands midway between
+    // them where nothing actually is. The escape derived from that is noise, and because the threats
+    // keep moving it is DIFFERENT noise every tick: the bot shoves one way, then the other, and nets
+    // no movement while looking like it cannot make up its mind. That is the "struggling to decide"
+    // symptom exactly - not a stall this time but a dither, which is why the earlier freeze fix did
+    // not catch it.
+    //
+    // There is also no averaged answer to find. Running from either threat runs into the other; the
+    // only way out from between them is SIDEWAYS. So when coherence is low we ignore the average
+    // entirely and slip perpendicular to the bearing of the biggest threat, picking whichever
+    // perpendicular we are already moving toward so the dodge keeps our momentum instead of
+    // fighting it.
+    bool incoherent = report.weapon_count > 1 && report.direction_coherence < kMinDirectionCoherence;
+
+    if (incoherent && report.strongest_bearing.LengthSq() > 0.0f) {
+      side = Perpendicular(report.strongest_bearing);
+
+      float velocity_alignment = side.Dot(self->velocity);
+      if (velocity_alignment < 0.0f) {
+        side = side * -1.0f;
+      } else if (velocity_alignment == 0.0f && side.Dot(self->GetHeading()) < 0.0f) {
+        side = side * -1.0f;
+      }
+    } else if (offset.LengthSq() > kMinOffsetSq) {
       side = Normalize(offset);
     } else if (incoming_direction.LengthSq() > 0.0f) {
       side = Perpendicular(incoming_direction);
@@ -120,6 +149,12 @@ struct DodgeIncomingDamage : public behavior::BehaviorNode {
 
     return result;
   }
+
+  // Below this level of agreement between incoming threats, the average direction is not a
+  // description of anything and we sidestep instead. 0.5 is the resultant length of two unit vectors
+  // 120 degrees apart, so anything from a wide spread up to directly opposing counts as incoherent,
+  // while a couple of shots from broadly the same side still averages normally.
+  static constexpr float kMinDirectionCoherence = 0.5f;
 
   float damage_percent_threshold = 0.0f;
   float distance = 0.0f;

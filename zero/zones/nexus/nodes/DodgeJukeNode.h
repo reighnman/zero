@@ -41,13 +41,48 @@ struct DodgeJukeNode : public behavior::BehaviorNode {
     Ray ray(report.average_origin, incoming_direction);
     Vector2f closest_hit = ray.GetClosestPosition(self->position);
 
-    Vector2f side = Normalize(self->position - closest_hit);
+    // Same two degenerate cases DodgeIncomingDamage handles, and they matter here for a different
+    // reason. This node's result is discarded (it runs Success-decorated inside the aim-and-shoot
+    // Parallel), so it can never stall the tree the way that one could - but it adds to the SHARED
+    // steering accumulator on every single tick it runs. A junk direction here is therefore not an
+    // absent force, it is a wrong one, blended into whatever the movement node is legitimately
+    // trying to do.
+    //
+    // Incoherent threats - a mine one side, a bomb the other - cancel in the average and leave
+    // noise that re-rolls each tick, so the juke jitters instead of committing. Slip perpendicular
+    // to the biggest threat instead, keeping whichever side we already have momentum toward.
+    //
+    // A head-on shot puts the threat line through us, making self->position - closest_hit zero.
+    // Normalize returns a zero vector unchanged rather than NaN, so `side * force` silently added
+    // NOTHING and the juke simply did not happen - against precisely the shot most worth juking.
+    constexpr float kMinOffsetSq = 0.01f;
+
+    Vector2f offset = self->position - closest_hit;
+    Vector2f side;
+
+    bool incoherent = report.weapon_count > 1 && report.direction_coherence < kMinDirectionCoherence;
+
+    if (incoherent && report.strongest_bearing.LengthSq() > 0.0f) {
+      side = Perpendicular(report.strongest_bearing);
+      if (side.Dot(self->velocity) < 0.0f) side = side * -1.0f;
+    } else if (offset.LengthSq() > kMinOffsetSq) {
+      side = Normalize(offset);
+    } else if (incoming_direction.LengthSq() > 0.0f) {
+      side = Perpendicular(incoming_direction);
+    } else {
+      return behavior::ExecuteResult::Failure;
+    }
+
     float force = minimum_force + damage_percent * 10.0f;
 
     ctx.bot->bot_controller->steering.force += side * force;
 
     return behavior::ExecuteResult::Success;
   }
+
+  // Matches DodgeIncomingDamage - see the note there. Below this level of agreement between
+  // incoming threats there is no consensus direction to average, and we sidestep instead.
+  static constexpr float kMinDirectionCoherence = 0.5f;
 
   float distance = 0.0f;
   float minimum_force = 2.0f;
