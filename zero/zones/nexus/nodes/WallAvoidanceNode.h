@@ -57,7 +57,7 @@ struct WallAvoidanceNode : public behavior::BehaviorNode {
     if (!self || self->ship >= 8) return behavior::ExecuteResult::Failure;
 
     auto& game = *ctx.bot->game;
-    float radius = game.connection.settings.ShipSettings[self->ship].GetRadius();
+    float radius = game.connection.settings.ShipSettings[self->ship].GetRadius() / 16.0f;  // GetRadius() is PIXELS; positions are tiles. Casting from position + direction * 14 started every ray 14 TILES out and made this node blind to exactly the terrain it exists to avoid.
 
     float speed = self->velocity.Length();
 
@@ -145,7 +145,7 @@ struct WallAvoidanceNode : public behavior::BehaviorNode {
   static constexpr int kCorneredBlockedRays = 11;
 
   static bool IsWallWithin(Game& game, const Player& self, float distance) {
-    float radius = game.connection.settings.ShipSettings[self.ship].GetRadius();
+    float radius = game.connection.settings.ShipSettings[self.ship].GetRadius() / 16.0f;  // PIXELS -> tiles, see the note in Execute
 
     for (size_t i = 0; i < kSampleCount; ++i) {
       float angle = (kTwoPi / kSampleCount) * i;
@@ -162,7 +162,7 @@ struct WallAvoidanceNode : public behavior::BehaviorNode {
   // same 16 rays twice.
   static void ScanOpenings(Game& game, const Player& self, float opening_distance, int* blocked_count,
                            float* best_open, Vector2f* best_direction) {
-    float radius = game.connection.settings.ShipSettings[self.ship].GetRadius();
+    float radius = game.connection.settings.ShipSettings[self.ship].GetRadius() / 16.0f;  // PIXELS -> tiles, see the note in Execute
     float enclosure_range = opening_distance * 0.5f;
 
     *blocked_count = 0;
@@ -189,7 +189,7 @@ struct WallAvoidanceNode : public behavior::BehaviorNode {
   // Most open heading, weighted toward one we'd rather be travelling in anyway.
   static Vector2f ChooseBiasedOpening(Game& game, const Player& self, float opening_distance,
                                       const Vector2f& preferred) {
-    float radius = game.connection.settings.ShipSettings[self.ship].GetRadius();
+    float radius = game.connection.settings.ShipSettings[self.ship].GetRadius() / 16.0f;  // PIXELS -> tiles, see the note in Execute
 
     Vector2f best_direction = self.GetHeading();
     float best_score = -1.0f;
