@@ -150,10 +150,23 @@ inline IncomingDamageReport GetIncomingDamage(behavior::ExecuteContext& ctx, Pla
         weighted_direction *= damage / average_damage;
       }
 
-      average_direction +=
+      // Running mean: new_mean = (sample + n * old_mean) / (n + 1). This ASSIGNS - it used to be
+      // `+=`, which adds the new mean on top of the old one and compounds every iteration. With two
+      // equal-damage weapons that reported 2x the true mean, with three about 3.7x, and it grew from
+      // there. DodgeIncomingDamage then multiplies by weapon_count on top, so the error landed
+      // hardest exactly when several weapons were inbound - the outnumbered fights where the bot
+      // could least afford it. Dodging short-circuits the entire fight Selector, so an inflated
+      // estimate did not merely cause a needless dodge, it suppressed that tick's offense
+      // altogether.
+      //
+      // No threshold retune is needed, which is why this can be fixed on its own: for a single
+      // weapon the old expression already produced the true value (n=0 makes it (d + 0)/1), so the
+      // one-weapon case that the 0.2 damage_percent_threshold was tuned against is unchanged. Only
+      // the multi-weapon case moves, and it moves from wrong to correct.
+      average_direction =
           (weighted_direction + (float)incoming_count * average_direction) / ((float)incoming_count + 1);
-      average_origin += (weapon.position + (float)incoming_count * average_origin) / ((float)incoming_count + 1);
-      average_damage += (damage + (float)incoming_count * average_damage) / ((float)incoming_count + 1);
+      average_origin = (weapon.position + (float)incoming_count * average_origin) / ((float)incoming_count + 1);
+      average_damage = (damage + (float)incoming_count * average_damage) / ((float)incoming_count + 1);
       ++incoming_count;
     }
   }
