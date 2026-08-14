@@ -425,8 +425,10 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
   // where the target is actually trending, instead of assuming they hold their current velocity.
   constexpr float kAimLeadBiasSeconds = 0.2f;
 
-  // Shot spread has been dropped from this tree entirely (the ShotSpreadNode header stays - other
-  // nexus behaviors still use it). It scaled deliberate aim error by how hard the target was
+  // Shot spread has been dropped from this tree entirely. The ShotSpreadNode header stays but is
+  // now called by no nexus behavior at all - TwosBox was the last one and was removed in f7958a8.
+  // (zones/svs/TerrierBehavior.cpp defines its own local ShotSpreadNode in the svs namespace and
+  // still uses that; it is a different type.) It scaled deliberate aim error by how hard the target was
   // maneuvering, on the theory that a dodging target needs to be hedged against rather than aimed
   // at precisely. The replay corpus doesn't support the premise: bullet hit rate is flat at ~13%
   // across every target lateral-speed bucket from 0-2 up to 18-20 tiles/sec, so accuracy is limited
