@@ -4,14 +4,11 @@
 #include <zero/game/GameEvent.h>
 #include <zero/game/Logger.h>
 #include <zero/zones/ZoneController.h>
-#include <zero/zones/nexus/PubOffenseBehavior.h>
-#include <zero/zones/nexus/PubCoverBehavior.h>
 #include <zero/zones/nexus/TestBehavior.h>
 #include <zero/zones/nexus/DuelBehavior.h>
 #include <zero/zones/nexus/TwosBehavior.h>
 #include <zero/zones/nexus/ThreesBehavior.h>
 #include <zero/zones/nexus/FoursBehavior.h>
-#include <zero/zones/nexus/TwosBoxBehavior.h>
 
 #include <zero/zones/nexus/Nexus.h>
 
@@ -38,33 +35,38 @@ struct NexusController : ZoneController, EventHandler<ChatEvent> {
 static NexusController controller;
 
 void NexusController::HandleEvent(const ChatEvent& event) {
-  std::string sender = event.sender;
-  std::string message = event.message;
+  // We only ever care about Team and Arena messages here -
+  // no reason to build strings out of Public/Private/Channel/etc. traffic we never look at.
+  if (event.type == ChatType::Team) {
+    std::string sender = event.sender;
+    std::string message = event.message;
 
-  
-  auto& chat_queue = bot->bot_controller->chat_queue;
-  
-  
-  if (event.type == ChatType::Team && message.find("SAFE") != std::string::npos && 
-      !(message.find("NOT") != std::string::npos)) {  
-    
+    if (message.find("SAFE") != std::string::npos && message.find("NOT") == std::string::npos) {
       // SAFE
-    Log(LogLevel::Info, "Setting tchat_safe");
-    bot->execute_ctx.blackboard.Set("tchat_safe", sender);
-    bot->execute_ctx.blackboard.Set<u32>("tchat_safe_timer", GetCurrentTick() + 600);
-   
-    // Event::Dispatch(ChatQueueEvent::Public("On my way!"));
-  } else if (event.type == ChatType::Team && message.find("SAFE") != std::string::npos &&
-    
+      Log(LogLevel::Info, "Setting tchat_safe");
+      bot->execute_ctx.blackboard.Set("tchat_safe", sender);
+      bot->execute_ctx.blackboard.Set<u32>("tchat_safe_timer", GetCurrentTick() + 600);
+    } else if (message.find("SAFE") != std::string::npos && message.find("NOT") != std::string::npos) {
       // NOT SAFE
-    message.find("NOT") != std::string::npos) {
-    Log(LogLevel::Info, "Setting tchat_notsafe");
-    bot->execute_ctx.blackboard.Set("tchat_notsafe", sender);
-    bot->execute_ctx.blackboard.Set<u32>("tchat_notsafe_timer", GetCurrentTick() + 600);
+      Log(LogLevel::Info, "Setting tchat_notsafe");
+      bot->execute_ctx.blackboard.Set("tchat_notsafe", sender);
+      bot->execute_ctx.blackboard.Set<u32>("tchat_notsafe_timer", GetCurrentTick() + 600);
+    }
+  } else if (event.type == ChatType::Arena) {
+    std::string message = event.message;
 
-    // Event::Dispatch(ChatQueueEvent::Public("On my way!"));
+    // The match system sends "GO!" as an arena message once the ready check finishes and the
+    // match actually begins. All of the versus behaviors (Fours, Duel, Twos, Threes) set
+    // a "match_startup" timer with a blind guess at how long ready-up will take when they leave
+    // spec, then gate ship entry / pre-fire / engaging on it expiring. Forcing that same key to
+    // expire the instant we see "GO!" makes them react to the real match start instead of the
+    // guess, without needing any changes in the individual behaviors - the blind timer they set
+    // on leaving spec becomes just a safety net in case this message is ever missed.
+    if (message.find("GO!") != std::string::npos) {
+      Log(LogLevel::Info, "Match start message received, expiring match_startup.");
+      bot->execute_ctx.blackboard.Set<u32>("match_startup", GetCurrentTick());
+    }
   }
-
 }
 
 void NexusController::CreateBehaviors(const char* arena_name) {
@@ -77,17 +79,13 @@ void NexusController::CreateBehaviors(const char* arena_name) {
 
   auto& repo = bot->bot_controller->behaviors;
 
-  repo.Add("puboffense", std::make_unique<PubOffenseBehavior>());
-  repo.Add("pubcover", std::make_unique<PubCoverBehavior>());
   repo.Add("duel", std::make_unique<DuelBehavior>());
   repo.Add("twos", std::make_unique<TwosBehavior>());
   repo.Add("threes", std::make_unique<ThreesBehavior>());
   repo.Add("fours", std::make_unique<FoursBehavior>());
-  repo.Add("twosbox", std::make_unique<TwosBoxBehavior>());
   repo.Add("test", std::make_unique<TestBehavior>());
-  
 
-  SetBehavior("puboffense");
+  SetBehavior("duel");
 }
 
 }  // namespace nexus
