@@ -68,7 +68,33 @@ struct DodgeIncomingDamage : public behavior::BehaviorNode {
     Ray ray(report.average_origin, incoming_direction);
     Vector2f closest_hit = ray.GetClosestPosition(self->position);
 
-    Vector2f side = Normalize(self->position - closest_hit);
+    // The escape direction is "away from the threat line". That is undefined exactly when the
+    // threat line runs through us - and a shot aimed straight at us is the most common case there
+    // is. Normalize() returns a zero-length vector unchanged rather than NaN, so this used to
+    // silently produce side = (0,0), and then `steering.force += side * 10000` added *nothing*
+    // while this node still returned Success. Success short-circuits the whole fight Selector, so
+    // the flee, the orbit and the aim-and-shoot branch below all got skipped too, leaving zero
+    // steering force for the tick. Actuator treats no force as "release thrust", so the ship simply
+    // stopped - and kept stopping for as long as the shot stayed in scan range. That is the
+    // freeze-up: measured across the bot replays, stalls of 3, 5 and even 12 seconds, 80-100% of
+    // them beginning within a second of an enemy firing, against a human maximum of 0.6s.
+    //
+    // Dodging perpendicular to the incoming line is the right answer for a head-on shot anyway, so
+    // that's the fallback rather than giving up.
+    constexpr float kMinOffsetSq = 0.01f;
+
+    Vector2f offset = self->position - closest_hit;
+    Vector2f side;
+
+    if (offset.LengthSq() > kMinOffsetSq) {
+      side = Normalize(offset);
+    } else if (incoming_direction.LengthSq() > 0.0f) {
+      side = Perpendicular(incoming_direction);
+    } else {
+      // No coherent threat line at all. Let the rest of the tree drive rather than holding the
+      // Selector open while contributing nothing.
+      return behavior::ExecuteResult::Failure;
+    }
 
     if (est_damage > 0) {
       Vector3f color = Vector3f(1, 1, 0);

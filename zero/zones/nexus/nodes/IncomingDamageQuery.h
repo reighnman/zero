@@ -84,6 +84,17 @@ inline IncomingDamageReport GetIncomingDamage(behavior::ExecuteContext& ctx, Pla
                    weapon.data.alternate;
 
     Vector2f relative_velocity = weapon.velocity - self->velocity;
+
+    // A weapon that isn't closing on us cannot reach us, and its "incoming direction" is
+    // meaningless. This matters because Normalize() returns a zero vector unchanged instead of
+    // NaN, so a near-stationary relative velocity used to yield direction = (0,0) - which makes the
+    // ray test below degenerate and poisons average_direction, and downstream leaves
+    // DodgeIncomingDamage with no usable escape direction. The case is real, not theoretical: a
+    // mine has exactly zero velocity, and a slow bomb tracked by a slow ship is close to it. Those
+    // are precisely the conditions the freeze-ups were reported under.
+    constexpr float kMinClosingSpeedSq = 0.25f;
+    if (relative_velocity.LengthSq() < kMinClosingSpeedSq) continue;
+
     Vector2f direction = Normalize(relative_velocity);
     Rectangle check_bounds = self_bounds;
 
