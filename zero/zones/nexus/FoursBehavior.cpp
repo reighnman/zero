@@ -374,7 +374,12 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // at 9.4% was firing only once escape was no longer possible - by then a single bomb finishes you
   // and the retreat has nowhere to go. Leaving at 25% is what buys enough margin to actually get
   // out. This is the most likely constant here to need softening if bots turn out too skittish.
-  constexpr float kCriticalEnergyPercent = 0.25f;
+  // Walked back from 0.25 after rec17. At 0.25 this fired far too readily and, combined with a
+  // retreat that used to suppress firing entirely, produced a 12-0 loss where the fleeing team got
+  // off 49-78 bullets all match. 0.18 still leaves meaningfully more escape margin than the
+  // original 0.094 - bots were dying at 7.9-15.3% before it was raised at all - without putting them
+  // in permanent retreat.
+  constexpr float kCriticalEnergyPercent = 0.18f;
 
   // EnergyDisadvantageNode only ever compares us to the *current target's* energy, so it has no
   // notion of being outnumbered: in a 3v1 where the nearest enemy happens to be the hurt one, it
@@ -614,6 +619,19 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "team_centroid") //Additive now - returns Failure so the flee below still runs and both forces sum
                             .Child<FleeNode>("nearest_aimshot", kLeashDistance, 5.0f, 0.2f, "target_energy", "team_centroid", kFleeTeamBiasRadians)
+                            .End()
+                        .Sequence(CompositeDecorator::Success) // Keep shooting at whoever is chasing us. Backing off must not mean going silent - this branch takes the whole Selector, so the aim-and-shoot block below never runs while it is active, and without this a retreating bot fired nothing at all. In rec17 that produced a death spiral: outnumbered -> permanent retreat -> no return fire -> still outnumbered. The losing team fired 49-78 bullets all match against the winners' 136-239 and lost 12-0. FleeNode already faces the threat while retreating, so the heading is right and this only needs permission to pull the trigger.
+                            .Child<TimerExpiredNode>("match_startup")
+                            .InvertChild<DistanceThresholdNode>("nearest_target_position", kMaxBulletRange)
+                            .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
+                            .InvertChild<InputQueryNode>(InputAction::Bomb)
+                            .InvertChild<TileQueryNode>(kTileIdSafe)
+                            .Child<ShotVelocityQueryNode>(WeaponType::Bullet, "bullet_fire_velocity")
+                            .Child<RayNode>("self_position", "bullet_fire_velocity", "bullet_fire_ray")
+                            .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "nearest_target_bounds", 4.0f)
+                            .Child<MoveRectangleNode>("nearest_target_bounds", "nearest_aimshot", "nearest_target_bounds")
+                            .Child<RayRectangleInterceptNode>("bullet_fire_ray", "nearest_target_bounds")
+                            .Child<InputActionNode>(InputAction::Bullet)
                             .End()
                         .End()
                     .Sequence() // Path to target if they aren't immediately visible.
