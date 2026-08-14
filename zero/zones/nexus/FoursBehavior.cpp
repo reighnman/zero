@@ -37,6 +37,7 @@
 #include <zero/zones/nexus/nodes/TeamFocusTargetNode.h>
 #include <zero/zones/nexus/nodes/PursuedFromBehindNode.h>
 #include <zero/zones/nexus/nodes/CruiseSpeedNode.h>
+#include <zero/zones/nexus/nodes/TargetEnergyPercentThresholdNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
@@ -155,6 +156,20 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // ordinary thrust would have covered, and then overshooting the target. This branch already sits
   // inside the rush sequence, so a rocket now means specifically "we are pressing a target we know
   // is weak, and it is far enough away to be getting off the hook".
+  // A rocket is for finishing something already nearly dead, on its own, while we can afford the
+  // dive - not for closing any gap that happens to be open. Live testing showed them going out far
+  // too freely, so the gate is now four conjunctive conditions rather than distance and speed alone.
+  //
+  // Target energy is a percent of that ship's own max rather than an absolute, for the same reason
+  // TargetEnergyPercentThresholdNode exists at all: a flat number means something different on
+  // every ship and bounty.
+  constexpr float kRocketTargetEnergyPercent = 0.20f;
+  constexpr float kRocketMinSelfEnergyPercent = 0.6f;
+  // "Isolated" means nobody of theirs within this radius. The count includes the target itself, so
+  // the gate fires only when the count is below 2.
+  constexpr float kRocketIsolationRadius = 20.0f;
+  constexpr float kRocketMaxEnemiesNearTarget = 2.0f;
+
   constexpr float kRocketChaseMinDistance = 16.0f;
   constexpr float kRocketChaseMaxDistance = 35.0f;
   // Escaping: only once whoever is chasing is genuinely running us down, not merely following.
@@ -243,9 +258,18 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // have room to maneuver instead of colliding.
   //
   // Measured bullet hit rate falls off a cliff right where the old fixed 15.0f sat: 33.3% at 10-14
-  // tiles against 16.3% at 15-19. Orbiting at 12 puts the whole pump cycle below that cliff instead
-  // of straddling it, and matches the 11.4t median range at which replay kills actually land.
-  constexpr float kOrbitDistance = 12.0f;
+  // tiles against 16.3% at 15-19, which is why this was originally pulled in to 12.
+  //
+  // Raised 20% to 14.4 off live observation: bots were sitting too close during ordinary trading
+  // fire, and paying for it - in rec15 they took 2.19-3.81 damage/sec against the human's 1.79 while
+  // landing comparable bullet accuracy. Holding a little further out costs some hit rate and buys
+  // back more than that in damage avoided.
+  //
+  // Note this puts the outer end of the pump (kPumpAmplitude, +/-4) at 18.4 tiles, past the
+  // accuracy cliff, where 12 used to keep the whole cycle underneath it. That is a deliberate
+  // trade rather than an oversight; if hit rate drops more than damage taken improves, trim the
+  // amplitude rather than pulling this back.
+  constexpr float kOrbitDistance = 14.4f;
 
   // An enemy inside this range is our problem regardless of what the rest of the team is doing -
   // we can't ignore someone shooting us in the face to go help elsewhere. Outside it, defer to the
@@ -421,6 +445,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                     .Child<PlayerPositionQueryNode>("self_position")
                     .Sequence() 
                         .Child<NearestMemoryTargetNode>("target")
+                        .Child<NearestMemoryTargetNode>("nearest_target") //Keep a handle on the genuinely nearest enemy - "target" gets overridden by the team focus and low-energy rules below, and the flee-side checks need the one actually on top of us
                         .Child<PlayerPositionQueryNode>("target", "target_position")
                         .Child<PlayerEnergyQueryNode>("target", "target_energy")
                         .Child<TargetAccelerationNode>("target", "target_acceleration")
@@ -495,6 +520,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                     .Child<LocalAdvantageNode>(kLocalAdvantageRadius, "local_advantage")
                     .Child<EngagementRangeNode>("local_advantage", "engagement_range", kOrbitDistance, kOutnumberedDistance, kPumpAmplitude, kPumpHalfPeriodTicks)
                     .Child<EnemiesNearTargetNode>("target", kMultifireClusterRadius, "enemies_near_target") //Drives the multifire toggle below
+                    .Child<EnemiesNearTargetNode>("target", kRocketIsolationRadius, "enemies_near_target_wide") //Wider count, for "is this target actually on its own" - drives the rocket gate
                     .Selector(CompositeDecorator::Success) // Keep the team's centre of mass fresh for the flee bias below - or clear it outright if we're the last one alive, so we don't retreat toward a dead teammate's last position.
                         .Child<TeamCentroidNode>("team_centroid")
                         .Child<BlackboardEraseNode>("team_centroid")
@@ -554,12 +580,13 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .End()
                     .Sequence()  //Keep enemy distance while reacharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
+                        .Child<BlackboardEraseNode>("rushing") //We're breaking off, so we are no longer pressing. Without this "rushing" is only ever cleared inside the aim-and-shoot Parallel below, which this branch skips entirely - so it stayed set for the whole retreat, keeping the commitment posture alive, bypassing the cruise-speed cap and the firing energy gate long after we stopped shooting.
                         .Sequence(CompositeDecorator::Success) // Drop a mine into our wake, only for a chaser actually running us down from behind.
                             .Child<PlayerEnergyPercentThresholdNode>(kMineMinEnergyPercent)
                             .Child<AtMaxSpeedNode>(kRocketMinSpeedPercent)
-                            .Child<PursuedFromBehindNode>("target", kMineRearConeDegrees, kMinePursuitClosingSpeed) //A mine only ever threatens someone who drives into it, so it has to be behind us and closing
-                            .Child<DistanceThresholdNode>("target_position", "self_position", kMineMinPursuerDistance)
-                            .InvertChild<DistanceThresholdNode>("target_position", "self_position", kMineMaxPursuerDistance)
+                            .Child<PursuedFromBehindNode>("nearest_target", kMineRearConeDegrees, kMinePursuitClosingSpeed) //Must be the enemy actually chasing us, not the team's focus target somewhere else - checking "target" here is how mines started getting laid offensively again
+                            .Child<DistanceThresholdNode>("nearest_target_position", "self_position", kMineMinPursuerDistance)
+                            .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", kMineMaxPursuerDistance)
                             .Child<TimerExpiredNode>("mine_timer")
                             .Child<MineAvailableNode>()
                             .Child<InputActionNode>(InputAction::Mine)
@@ -604,7 +631,10 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                     .Child<ScalarNode>(1.0f, "rushing") // set rushing status 
                                     .Sequence(CompositeDecorator::Success) //Rocket down a fleeing kill, but only once we're already moving - lit from slow it mostly buys back speed we'd have reached anyway, and it overshoots.
                                         .Child<ShipItemCountThresholdNode>(ShipItemType::Rocket) // check we have rocket items
-                                        .Child<PlayerEnergyPercentThresholdNode>(0.6f) // check we have sufficient energy
+                                        .Child<PlayerEnergyPercentThresholdNode>(kRocketMinSelfEnergyPercent) // only commit a limited item while we can still afford the dive
+                                        .Child<TargetEnergyPercentThresholdNode>("target", "target_energy", kRocketTargetEnergyPercent) // percent of the target's own max, not an absolute - a rocket is for finishing something already nearly dead
+                                        .InvertChild<ScalarThresholdNode<float>>("enemies_near_target_wide", kRocketMaxEnemiesNearTarget) // and only if it's on its own - diving a target with friends around just delivers us into them
+                                        .Child<TimerExpiredNode>("recharge_timer") // never light one while we're supposed to be breaking off
                                         .InvertChild<RocketActiveQueryNode>() // don't stack one on top of a burn already running
                                         .Child<AtMaxSpeedNode>(kRocketMinSpeedPercent)
                                         .InvertChild<DistanceThresholdNode>("target_position", kRocketChaseMaxDistance)  //dont rocket if too far away
