@@ -31,6 +31,7 @@
 #include <zero/zones/nexus/nodes/EngagementRangeNode.h>
 #include <zero/zones/nexus/nodes/BroadsideFaceNode.h>
 #include <zero/zones/nexus/nodes/BombBlastSafetyNode.h>
+#include <zero/zones/nexus/nodes/ClampedLeadAimNode.h>
 #include <zero/zones/nexus/nodes/TeamCentroidNode.h>
 #include <zero/zones/nexus/nodes/IncomingBlastDamageNode.h>
 #include <zero/zones/nexus/nodes/RocketUsageNode.h>
@@ -486,6 +487,15 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
   // ~1.2s. Frequent enough to matter on a long approach, slow enough that it cannot drain the tank
   // it is spending the surplus of.
   constexpr u32 kLobBombCooldownTicks = 120;
+  // How far the predicted aim point may sit from where the target actually is. Flight time grows
+  // with range, so the solved lead grows with range - but our confidence in it falls at the same
+  // time, and out at 30-78 tiles the solver was extrapolating a second or more ahead and placing the
+  // aim tens of tiles away, frequently inside terrain (which then also failed the LOS gate, so the
+  // shot was lost rather than merely missed). At this range the lob is an area weapon thrown at a
+  // group that has not necessarily noticed it: landing near where they are and catching someone
+  // flat-footed beats precisely missing someone who dodged. Applies to the far lob ONLY - the
+  // close-range bomb check keeps the full unclamped solution.
+  constexpr float kLobBombMaxLeadDistance = 4.0f;
 
   // Burst-fire pacing (a 0.3s firing window followed by a forced ~1s pause) used to live here and
   // has been removed, because the corpus says it was modelling a habit that doesn't exist and
@@ -1059,7 +1069,8 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
                                 .Child<PlayerEnergyPercentThresholdNode>(kLobBombMinEnergyPercent) // surplus only
                                 .Child<DistanceThresholdNode>("nearest_target_position", "self_position", kLobBombMinDistance) // Measured against the NEAREST enemy, not the focus target. TeamFocusTargetNode picks off the team centroid, so "target" is usually not the closest enemy - gating on it would happily lob at a distant group while someone sat on top of us, which is the exact posture this is supposed to replace. Nearest enemy 32+ tiles out is what actually means "approaching from a distance".
                                 .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", kLobBombMaxDistance)
-                                .Child<VectorSubtractNode>("bomb_aimshot", "self_position", "lob_target_direction", true)
+                                .Child<ClampedLeadAimNode>("target", "bomb_aimshot", "lob_aimshot", kLobBombMaxLeadDistance) // Cap the lead. Flight time - and so the predicted lead - grows with range while confidence in it falls, so out here the solver was placing the aim point tens of tiles from the target, often inside terrain, which both missed and failed the LOS gate. Only the far lob uses this; the close-range bomb keeps the full solution in "bomb_aimshot".
+                                .Child<VectorSubtractNode>("lob_aimshot", "self_position", "lob_target_direction", true)
                                 .Child<PlayerVelocityQueryNode>("self_velocity")
                                 .Child<VectorDotNode>("self_velocity", "lob_target_direction", "lob_forward_velocity") // recomputed rather than reusing the close-range block's value, which is stale whenever that block exited early
                                 .Child<ScalarThresholdNode<float>>("lob_forward_velocity", kLobBombMinClosingSpeed) // actually running back in, not drifting off
@@ -1068,12 +1079,12 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
                                 .Child<TimerExpiredNode>("lob_bomb_timer")
                                 .InvertChild<TileQueryNode>(kTileIdSafe)
-                                .Child<BombBlastSafetyNode>("bomb_aimshot", kBombFriendlyBlastMargin) // a lob into a group is exactly where a teammate can be standing
-                                .Child<ShotLineOfSightNode>("bomb_aimshot", 0.0f, true) // long lane, so terrain matters more here than anywhere else. Proximity-aware: the fuse trips on the ship, so only the lane up to prox range has to be clear.
+                                .Child<BombBlastSafetyNode>("lob_aimshot", kBombFriendlyBlastMargin) // a lob into a group is exactly where a teammate can be standing. Checked against the CLAMPED point, since that is where the bomb is actually going.
+                                .Child<ShotLineOfSightNode>("lob_aimshot", 0.0f, true) // long lane, so terrain matters more here than anywhere else. Proximity-aware: the fuse trips on the ship, so only the lane up to prox range has to be clear.
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "lob_fire_velocity")
                                 .Child<RayNode>("self_position", "lob_fire_velocity", "lob_fire_ray")
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "lob_target_bounds", kLobBombProximityMultiplier) // area denial into a group, not a precise shot at one ship
-                                .Child<MoveRectangleNode>("lob_target_bounds", "bomb_aimshot", "lob_target_bounds")
+                                .Child<MoveRectangleNode>("lob_target_bounds", "lob_aimshot", "lob_target_bounds")
                                 .Child<RayRectangleInterceptNode>("lob_fire_ray", "lob_target_bounds")
                                 .Child<InputActionNode>(InputAction::Bomb)
                                 .Child<TimerSetNode>("lob_bomb_timer", kLobBombCooldownTicks)
