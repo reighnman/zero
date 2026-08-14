@@ -90,7 +90,11 @@ struct BombBlastSafetyNode : public behavior::BehaviorNode {
 
       Vector2f closest = from + direction * projected;
 
-      float ship_radius = settings.ShipSettings[player->ship].GetRadius();
+      // GetRadius() is in PIXELS; positions and prox_radius are in tiles. Without the /16 this
+      // added ~14 tiles of slop to the fuse check, so almost any enemy anywhere near the lane
+      // counted as tripping the fuse early and the node then vetoed the shot on a friendly near
+      // that imaginary detonation point. That is a large part of why the bots fire so few bombs.
+      float ship_radius = settings.ShipSettings[player->ship].GetRadius() / 16.0f;
       if (closest.Distance(player->position) > prox_radius + ship_radius) continue;
 
       if (IsFriendlyCaught(ctx, *self, closest, danger_radius)) return behavior::ExecuteResult::Failure;
