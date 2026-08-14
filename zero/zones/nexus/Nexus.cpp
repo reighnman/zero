@@ -9,7 +9,6 @@
 #include <zero/zones/nexus/TwosBehavior.h>
 #include <zero/zones/nexus/ThreesBehavior.h>
 #include <zero/zones/nexus/FoursBehavior.h>
-#include <zero/zones/nexus/TwosBoxBehavior.h>
 
 #include <zero/zones/nexus/Nexus.h>
 
@@ -57,7 +56,7 @@ void NexusController::HandleEvent(const ChatEvent& event) {
     std::string message = event.message;
 
     // The match system sends "GO!" as an arena message once the ready check finishes and the
-    // match actually begins. All of the versus behaviors (Fours, Duel, Twos, TwosBox, Threes) set
+    // match actually begins. All of the versus behaviors (Fours, Duel, Twos, Threes) set
     // a "match_startup" timer with a blind guess at how long ready-up will take when they leave
     // spec, then gate ship entry / pre-fire / engaging on it expiring. Forcing that same key to
     // expire the instant we see "GO!" makes them react to the real match start instead of the
@@ -84,7 +83,6 @@ void NexusController::CreateBehaviors(const char* arena_name) {
   repo.Add("twos", std::make_unique<TwosBehavior>());
   repo.Add("threes", std::make_unique<ThreesBehavior>());
   repo.Add("fours", std::make_unique<FoursBehavior>());
-  repo.Add("twosbox", std::make_unique<TwosBoxBehavior>());
   repo.Add("test", std::make_unique<TestBehavior>());
 
   SetBehavior("duel");

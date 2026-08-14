@@ -406,7 +406,7 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
   // Minimum spacing we insist on from *any* enemy, not just the one we're shooting. Set inside the
   // inner edge of the engagement pump (kOrbitDistance - kPumpAmplitude = 10.4) so it only pushes
   // back when someone is closer than we ever intend to be, rather than fighting normal station
-  // keeping. TwosBoxBehavior has carried this for a while; Fours never picked it up.
+  // keeping.
   constexpr float kAvoidEnemyDistance = 10.0f;
 
   // How close a wall needs to be before we override movement to steer clear of it while fleeing.
