@@ -44,6 +44,7 @@
 #include <zero/zones/nexus/nodes/EnergyDisadvantageNode.h>
 #include <zero/zones/nexus/nodes/TargetEnergyDropNode.h>
 #include <zero/zones/nexus/nodes/ShotLineOfSightNode.h>
+#include <zero/zones/nexus/nodes/BombImpactLikelihoodNode.h>
 #include <zero/zones/nexus/nodes/TargetOpeningRangeNode.h>
 #include <zero/zones/nexus/nodes/FinishableTargetNode.h>
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
@@ -329,7 +330,32 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // Bomb hitbox tolerance multiplier while orbiting - bigger than the bullet/thor multiplier below
   // so bombs land as area denial off a near miss instead of needing a precise direct hit, like
   // lobbing them into blast range instead of sniping with them.
+  //
+  // This is now only the coarse geometry filter. It is deliberately range-blind - an 8x box is as
+  // easy to clip at 30 tiles as at 10 - which is why bomb hit rate sat flat and low (8-21%) instead
+  // of falling off with range the way it physically must. BombImpactLikelihoodNode does the real
+  // work now; this just cheaply rejects shots pointed nowhere near the target.
   constexpr float kBombProximityMultiplier = 8.0f;
+
+  // How much of the proximity-fuse radius the target is allowed to be able to escape during the
+  // bomb's flight. 1.0 means "they can just barely slip it"; below 1.0 demands margin.
+  //
+  // Set at 1.0 rather than tighter because the evasion estimate is already conservative on two
+  // counts - it assumes the target holds MaximumThrust whether or not they have the prizes, and it
+  // gives them the dodge for free without charging any rotation time. Stacking a tight tolerance on
+  // top of a pessimistic model would silence bombs entirely, and bomb accuracy is one of the few
+  // places the bots already clearly beat the human (15-33% against his 8-10%).
+  //
+  // What this works out to, solving 0.5*a*(d/v)^2 = hit_radius across plausible arena settings
+  // (BombSpeed 2000-5000, MaximumThrust 15-40, ProximityDistance 4): an effective maximum bomb
+  // range of roughly 13-25 tiles, 7.5-30.6 at the extremes. That lands on the right side of the
+  // measured split - in rec22 bombs hit 21.2% at 10-19 tiles against 13.1% at 20-29 - and it
+  // arrives there from the physics rather than from a hand-set range cap.
+  //
+  // Since the exact arena settings aren't visible from here, this is the constant to check first if
+  // bomb volume collapses: raising it widens range as sqrt(tolerance), so 1.5 buys about 22% more
+  // reach. Bots currently fire only 9-27 bombs a match, so there isn't much room to lose.
+  constexpr float kBombImpactTolerance = 1.0f;
 
   // Burst-fire pacing (a 0.3s firing window followed by a forced ~1s pause) used to live here and
   // has been removed, because the corpus says it was modelling a habit that doesn't exist and
@@ -812,6 +838,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .InvertChild<DistanceThresholdNode>("nearest_target_position", 50.0f)  //dont bomb from too far
                                 .Child<BombBlastSafetyNode>("bomb_aimshot", kBombFriendlyBlastMargin)  //never bomb when the blast would catch us or a teammate - fall through to bullets instead
                                 .Child<ShotLineOfSightNode>("bomb_aimshot")  //Hard gate: bombs don't pass through walls, and a bomb detonating on terrain we're stood near is the self-blast case we already try to avoid. No bounce allowance - BombBounceCount is commonly 0 and a bounced bomb does reduced damage anyway.
+                                .Child<BombImpactLikelihoodNode>("target", "bomb_aimshot", kBombImpactTolerance)  //Will this bomb actually arrive while they're still there? Compares how far the target can thrust clear during the bomb's flight against the proximity radius. Self-tuning by range: evasion grows with flight time squared, so this tightens with distance on its own where the old 8x bounding box was equally easy to clip at 30 tiles as at 10.
                                 .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity") // check bomb velocity
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray") // check collision ray
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", kBombProximityMultiplier) // lob range, not a precise hit
