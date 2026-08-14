@@ -182,7 +182,30 @@ struct FleeNode : public behavior::BehaviorNode {
     // target steers around walls instead of being driven straight into them. Facing the threat
     // while doing so means the retreat force ends up behind our heading, so Actuator backs us
     // away with reverse thrust instead of turning around to face the retreat direction.
-    steering.Face(game, threat_position);
+    //
+    // THAT POSTURE CANNOT STEER, which is why it has to be given up the moment terrain is in the
+    // way. Reversing nose-locked leaves almost no directional authority, and the reason is exact:
+    // Actuator blends the steering force against the rotation target, and when the two disagree by
+    // more than `rotation_threshold` it pins the steering direction to within 0.1 RADIANS - about
+    // 5.7 degrees - of the rotation target (Actuator.cpp, the `steering_direction.Dot(rotate_target)
+    // < rotation_threshold` branch). Facing the threat while the retreat force points the opposite
+    // way is the maximum possible disagreement, so it clamps every tick and the bot reverses in a
+    // near-straight line. Wall avoidance can pile on as much force as it likes; the hull barely
+    // turns, and we back into the wall anyway. Reported directly, twice, as getting stuck against
+    // walls while flying backwards.
+    //
+    // So when the retreat path is blocked we turn around and RUN FORWARDS instead. Facing the
+    // retreat direction puts the force ahead of the heading, which means forward thrust and the
+    // full turn rate to steer with - the ship can actually round the obstacle. The cost is real
+    // (a turn away from the threat, and our return fire stops bearing for its duration) but it is
+    // much cheaper than being pinned, which is what has been killing them.
+    bool retreat_blocked = IsPathBlocked(game, *self, retreat_direction);
+
+    if (retreat_blocked) {
+      steering.Face(game, self->position + retreat_direction * 100.0f);
+    } else {
+      steering.Face(game, threat_position);
+    }
 
     if (panicking) {
       // Seek's 3-arg overload switches to closing back in once past `distance`, which is exactly
@@ -206,9 +229,16 @@ struct FleeNode : public behavior::BehaviorNode {
     // Actuator picks Forward whenever that combined force reads as ahead of heading, which here
     // means thrusting into the threat instead of away from it. Clamp the heading-aligned component
     // so this branch's "away" guarantee holds regardless of what else added to force this tick.
-    float heading_component = steering.force.Dot(self->GetHeading());
-    if (heading_component > -kMinRetreatForce) {
-      steering.force -= self->GetHeading() * (heading_component + kMinRetreatForce);
+    //
+    // Only in reverse mode. The clamp forces a component along -heading, which is "away from the
+    // threat" only while the nose is ON the threat. Once we have turned to run forwards it would
+    // subtract from the direction we are now flying, shoving us back toward the wall we just turned
+    // to avoid - the exact failure this whole branch exists to fix, reintroduced one line later.
+    if (!retreat_blocked) {
+      float heading_component = steering.force.Dot(self->GetHeading());
+      if (heading_component > -kMinRetreatForce) {
+        steering.force -= self->GetHeading() * (heading_component + kMinRetreatForce);
+      }
     }
 
     return behavior::ExecuteResult::Success;
@@ -227,6 +257,33 @@ struct FleeNode : public behavior::BehaviorNode {
   // Minimum backward-facing force to guarantee during active retreat, so Actuator can never read
   // the combined steering.force as pointing toward the threat once Seek's own contribution decays.
   static constexpr float kMinRetreatForce = 1.0f;
+
+  // How far down the retreat line to look for terrain, in seconds of travel. Has to cover the
+  // distance needed to TURN rather than the distance needed to stop: a ship at retreat speed
+  // carrying real momentum needs most of a second to bring its nose around, and the turn has to be
+  // finished before arrival, not started at it.
+  static constexpr float kRetreatLookaheadSeconds = 1.2f;
+  // Floor for the above, so a bot that has just started moving - or is pinned and barely moving,
+  // which is exactly the state we most need to detect - still looks far enough to see the wall it
+  // is stuck against.
+  static constexpr float kRetreatMinLookahead = 14.0f;
+
+  // Is there terrain down the line we intend to retreat along?
+  static bool IsPathBlocked(Game& game, Player& self, const Vector2f& direction) {
+    if (direction.LengthSq() < 0.0001f) return false;
+
+    // GetRadius() is in PIXELS and positions are in tiles - the /16 matters. Without it the ray
+    // starts 14 TILES ahead of the ship and is blind to everything in between, which is the same
+    // bug that made WallAvoidanceNode unable to see the walls it was meant to avoid.
+    float radius = game.connection.settings.ShipSettings[self.ship].GetRadius() / 16.0f;
+
+    float lookahead = self.velocity.Length() * kRetreatLookaheadSeconds;
+    if (lookahead < kRetreatMinLookahead) lookahead = kRetreatMinLookahead;
+
+    CastResult result = game.GetMap().Cast(self.position + direction * radius, direction, lookahead, self.frequency);
+
+    return result.hit;
+  }
 };
 
 }  // namespace nexus
