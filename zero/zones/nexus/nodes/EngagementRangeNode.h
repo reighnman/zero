@@ -4,6 +4,7 @@
 #include <zero/ZeroBot.h>
 #include <zero/behavior/BehaviorTree.h>
 #include <zero/game/Game.h>
+#include <zero/zones/nexus/nodes/EngagementPump.h>
 
 #include <cmath>
 
@@ -34,18 +35,21 @@ namespace nexus {
 //    robotic and trivially easy to lead a shot against, since the range at impact time is knowable
 //    in advance. Oscillating reproduces the human rhythm and keeps the closing speed changing.
 //
-// The pump is a triangle wave rather than a sine so the approach and retreat legs hold a constant
-// rate, which is what the run-length data actually describes - a steady push in, then a steady
-// pull back out, not a smoothly easing drift that lingers at the extremes.
+// The pump itself now lives in EngagementPump.h and is shared with the duel tree, which has no
+// head-count to feed this node but needs the oscillation just as much. This node keeps ownership of
+// the part that is genuinely about head-count - which base distance applies - and delegates the
+// rest. Behavior here is unchanged by that split.
 struct EngagementRangeNode : public behavior::BehaviorNode {
   EngagementRangeNode(const char* advantage_key, const char* output_key, float supported_distance,
-                      float outnumbered_distance, float pump_amplitude, u32 pump_half_period_ticks)
+                      float outnumbered_distance, float pump_amplitude, u32 pump_half_period_ticks,
+                      const char* outbound_key = nullptr)
       : advantage_key(advantage_key),
         output_key(output_key),
         supported_distance(supported_distance),
         outnumbered_distance(outnumbered_distance),
         pump_amplitude(pump_amplitude),
-        pump_half_period_ticks(pump_half_period_ticks) {}
+        pump_half_period_ticks(pump_half_period_ticks),
+        outbound_key(outbound_key) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     auto opt_advantage = ctx.blackboard.Value<float>(advantage_key);
@@ -55,26 +59,20 @@ struct EngagementRangeNode : public behavior::BehaviorNode {
     // closing, so the split is at zero rather than at a positive margin.
     float base = *opt_advantage < 0.0f ? outnumbered_distance : supported_distance;
 
-    ctx.blackboard.Set<float>(output_key, base + GetPumpOffset());
+    ctx.blackboard.Set<float>(output_key, base + pump.Update(pump_amplitude, pump_half_period_ticks));
+
+    if (outbound_key) {
+      if (pump.IsOutboundLeg()) {
+        ctx.blackboard.Set(outbound_key, true);
+      } else {
+        ctx.blackboard.Erase(outbound_key);
+      }
+    }
 
     return behavior::ExecuteResult::Success;
   }
 
  private:
-  // Triangle wave in [-pump_amplitude, +pump_amplitude] over a full period of two half-periods.
-  float GetPumpOffset() const {
-    if (pump_amplitude <= 0.0f || pump_half_period_ticks == 0) return 0.0f;
-
-    u32 period = pump_half_period_ticks * 2;
-    u32 phase = GetCurrentTick() % period;
-
-    // Rises across the first half-period, falls across the second.
-    float t = (float)phase / (float)pump_half_period_ticks;
-    float ramp = t <= 1.0f ? t : 2.0f - t;
-
-    return (ramp * 2.0f - 1.0f) * pump_amplitude;
-  }
-
   const char* advantage_key = nullptr;
   const char* output_key = nullptr;
 
@@ -82,6 +80,11 @@ struct EngagementRangeNode : public behavior::BehaviorNode {
   float outnumbered_distance = 0.0f;
   float pump_amplitude = 0.0f;
   u32 pump_half_period_ticks = 0;
+  const char* outbound_key = nullptr;
+
+  // Per-instance, not on the blackboard - a fixed blackboard key is exactly the bug that silently
+  // zeroed the aim-lead estimate. One ZeroBot per process, so this is per-bot state.
+  EngagementPump pump;
 };
 
 }  // namespace nexus

@@ -28,6 +28,7 @@
 #include <zero/zones/nexus/nodes/OrbitNode.h>
 #include <zero/zones/nexus/nodes/LocalAdvantageNode.h>
 #include <zero/zones/nexus/nodes/EngagementRangeNode.h>
+#include <zero/zones/nexus/nodes/BroadsideFaceNode.h>
 #include <zero/zones/nexus/nodes/BombBlastSafetyNode.h>
 #include <zero/zones/nexus/nodes/TeamCentroidNode.h>
 #include <zero/zones/nexus/nodes/IncomingBlastDamageNode.h>
@@ -323,10 +324,20 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
   // 19.2, a 25% edge. A throttle that cuts our rate of fire is therefore imitating the losing half
   // of the ladder.
   //
-  // The between-volley BroadsideFaceNode branch went with it: it keyed off the burst timer, so with
-  // no bursts it would have fired on every orbiting tick instead of only during lulls. The data
-  // doesn't support broadside as a protective stance anyway - damage taken *rises* with heading
-  // offset, from 5.31 per sample nose-on to 8.10 at 90 degrees.
+  // The between-volley BroadsideFaceNode branch went with it at the time, because it keyed off that
+  // same burst timer. It is back, now keyed to the engagement pump's outbound leg instead - see the
+  // Selector at the head of the aim-and-shoot Parallel. Tying it to the movement rhythm rather than
+  // to a firing timer is what makes it safe: broadside stops the shot ray crossing the target, so
+  // anything that entered broadside *because* we had not fired recently would prevent the firing
+  // that releases it. Legs alternate on their own, so the window is always bounded.
+  //
+  // CAVEAT, and it is a real one: the corpus does not support broadside as a protective stance.
+  // Damage taken *rises* sharply with heading offset - 5.2 per sample nose-on against 24.7 at
+  // 90-119 degrees across rec20-23, a far starker split than the 5.3 -> 8.1 first measured. The
+  // likeliest reading is still reverse causation, since you turn away once you are already being
+  // hit, but it has not been demonstrated. This is in on the argument that a ship can only thrust
+  // along its heading, so nose-on is the one attitude from which evading costs a full rotation
+  // first. If damage taken climbs without hit rate improving, this is the branch to pull.
 
   // How long to keep pressing an advantage after the target loses energy (hit or spent shooting)
   // while we still have more than they do - a sustained window instead of a single-tick reaction,
@@ -548,7 +559,7 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
                     .End()
                 .Sequence(CompositeDecorator::Success) // Work out how close we should be fighting right now: the exchange favors closing hard at parity or better, and backing off while outnumbered.
                     .Child<LocalAdvantageNode>(kLocalAdvantageRadius, "local_advantage")
-                    .Child<EngagementRangeNode>("local_advantage", "engagement_range", kOrbitDistance, kOutnumberedDistance, kPumpAmplitude, kPumpHalfPeriodTicks)
+                    .Child<EngagementRangeNode>("local_advantage", "engagement_range", kOrbitDistance, kOutnumberedDistance, kPumpAmplitude, kPumpHalfPeriodTicks, "pump_outbound")
                     .Child<EnemiesNearTargetNode>("target", kMultifireClusterRadius, "enemies_near_target") //Drives the multifire toggle below
                     .Child<EnemiesNearTargetNode>("target", kRocketIsolationRadius, "enemies_near_target_wide") //Wider count, for "is this target actually on its own" - drives the rocket gate
                     .Selector(CompositeDecorator::Success) // Keep the team's centre of mass fresh for the flee bias below - or clear it outright if we're the last one alive, so we don't retreat toward a dead teammate's last position.
@@ -694,7 +705,15 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
                     .Sequence() // Aim at target and shoot while seeking them.
                         .Child<TimerExpiredNode>("match_startup")
                         .Parallel()
-                            .Child<FaceNode>("aimshot")
+                            .Selector() // Face the target to line up a shot, or go broadside between waves.
+                                .Sequence() // The pump's outbound leg IS the gap between waves - we're opening the range, not pressing. Turning side-on through it puts our thrust axis across their line of fire, so a dodge costs no rotation first and we're already moving laterally when their shot arrives. The leg flips inward on its own, so this window is always bounded and always followed by a facing window; gating on "haven't fired lately" instead would latch, since broadside stops the shot ray crossing the target in the first place.
+                                    .Child<BlackboardSetQueryNode>("pump_outbound")
+                                    .InvertChild<BlackboardSetQueryNode>("rushing") //A committed dive stays nose-on
+                                    .InvertChild<BlackboardSetQueryNode>("finishing")
+                                    .Child<BroadsideFaceNode>("target_position")
+                                    .End()
+                                .Child<FaceNode>("aimshot")
+                                .End()
                             .Child<BlackboardEraseNode>("rushing") // Clear rushing status
                             .Sequence(CompositeDecorator::Success) // Juke away from moderate incoming threats without breaking aim off the target.
                                 .Child<DodgeJukeNode>(30.0f)

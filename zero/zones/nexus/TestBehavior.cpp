@@ -28,6 +28,7 @@
 #include <zero/zones/nexus/nodes/OrbitNode.h>
 #include <zero/zones/nexus/nodes/LocalAdvantageNode.h>
 #include <zero/zones/nexus/nodes/EngagementRangeNode.h>
+#include <zero/zones/nexus/nodes/BroadsideFaceNode.h>
 #include <zero/zones/nexus/nodes/BombBlastSafetyNode.h>
 #include <zero/zones/nexus/nodes/TeamCentroidNode.h>
 #include <zero/zones/nexus/nodes/IncomingBlastDamageNode.h>
@@ -503,7 +504,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                     .End()
                 .Sequence(CompositeDecorator::Success) // Work out how close we should be fighting right now: the exchange favors closing hard at parity or better, and backing off while outnumbered.
                     .Child<LocalAdvantageNode>(kLocalAdvantageRadius, "local_advantage")
-                    .Child<EngagementRangeNode>("local_advantage", "engagement_range", kOrbitDistance, kOutnumberedDistance, kPumpAmplitude, kPumpHalfPeriodTicks)
+                    .Child<EngagementRangeNode>("local_advantage", "engagement_range", kOrbitDistance, kOutnumberedDistance, kPumpAmplitude, kPumpHalfPeriodTicks, "pump_outbound")
                     .Child<EnemiesNearTargetNode>("target", kMultifireClusterRadius, "enemies_near_target") //Drives the multifire toggle below
                     .Child<EnemiesNearTargetNode>("target", kRocketIsolationRadius, "enemies_near_target_wide") //Wider count, for "is this target actually on its own" - drives the rocket gate
                     .Selector(CompositeDecorator::Success) // Keep the team's centre of mass fresh for the flee bias below - or clear it outright if we're the last one alive, so we don't retreat toward a dead teammate's last position.
@@ -646,7 +647,15 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                         .End()
                     .Sequence() // Aim at target and shoot while seeking them.
                         .Parallel()
-                            .Child<FaceNode>("aimshot")
+                            .Selector() // Face the target to line up a shot, or go broadside between waves.
+                                .Sequence() // The pump's outbound leg IS the gap between waves - we're opening the range, not pressing. Turning side-on through it puts our thrust axis across their line of fire, so a dodge costs no rotation first and we're already moving laterally when their shot arrives. The leg flips inward on its own, so this window is always bounded and always followed by a facing window; gating on "haven't fired lately" instead would latch, since broadside stops the shot ray crossing the target in the first place.
+                                    .Child<BlackboardSetQueryNode>("pump_outbound")
+                                    .InvertChild<BlackboardSetQueryNode>("rushing") //A committed dive stays nose-on
+                                    .InvertChild<BlackboardSetQueryNode>("finishing")
+                                    .Child<BroadsideFaceNode>("target_position")
+                                    .End()
+                                .Child<FaceNode>("aimshot")
+                                .End()
                             .Child<BlackboardEraseNode>("rushing") // Clear rushing status
                             .Sequence(CompositeDecorator::Success) // Juke away from moderate incoming threats without breaking aim off the target.
                                 .Child<DodgeJukeNode>(30.0f)
