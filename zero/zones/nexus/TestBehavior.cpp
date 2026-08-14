@@ -141,7 +141,11 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // Target energy is a percent of that ship's own max rather than an absolute, for the same reason
   // TargetEnergyPercentThresholdNode exists at all: a flat number means something different on
   // every ship and bounty.
-  constexpr float kRocketTargetEnergyPercent = 0.20f;
+  // Lowered 20% from 0.20 after deaths were still being traced to offensive rockets. Also errs low
+  // deliberately: target_energy is a HeuristicEnergyTracker estimate capped below the ship's true
+  // maximum, so dividing it by the true maximum biases target_percent downward and makes this gate
+  // effectively looser than written.
+  constexpr float kRocketTargetEnergyPercent = 0.16f;
   constexpr float kRocketMinSelfEnergyPercent = 0.6f;
   // "Isolated" means nobody of theirs within this radius. The count includes the target itself, so
   // the gate fires only when the count is below 2.

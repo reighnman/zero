@@ -141,7 +141,16 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
   // Target energy is a percent of that ship's own max rather than an absolute, for the same reason
   // TargetEnergyPercentThresholdNode exists at all: a flat number means something different on
   // every ship and bounty.
-  constexpr float kRocketTargetEnergyPercent = 0.20f;
+  // Lowered 20% from 0.20 after deaths were still being traced to offensive rockets, despite the
+  // gate already requiring the target isolated, us up bodies, and the target actively running.
+  //
+  // There is a systematic reason this gate fires more readily than its number suggests, and it
+  // argues for erring low: `target_energy` is a HeuristicEnergyTracker *estimate*, not a reading,
+  // and it is capped below the ship's true maximum. Dividing a capped estimate by the true maximum
+  // biases target_percent DOWNWARD, so enemies read as weaker than they are and the threshold is
+  // effectively looser than written. Tightening the constant compensates without pretending we can
+  // fix the estimate.
+  constexpr float kRocketTargetEnergyPercent = 0.16f;
   constexpr float kRocketMinSelfEnergyPercent = 0.6f;
   // "Isolated" means nobody of theirs within this radius. The count includes the target itself, so
   // the gate fires only when the count is below 2.
