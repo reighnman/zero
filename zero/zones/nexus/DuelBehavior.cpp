@@ -18,6 +18,7 @@
 #include <zero/zones/svs/nodes/IncomingDamageQueryNode.h>
 #include <zero/zones/svs/nodes/MemoryTargetNode.h>
 #include <zero/zones/nexus/nodes/FleeNode.h>
+#include <zero/zones/nexus/nodes/FleeDistanceNode.h>
 #include <zero/zones/nexus/nodes/OrbitNode.h>
 #include <zero/zones/nexus/nodes/EngagementPump.h>
 #include <zero/zones/nexus/nodes/BroadsideFaceNode.h>
@@ -131,7 +132,17 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   constexpr float kPumpAmplitude = 4.0f;
   constexpr u32 kPumpHalfPeriodTicks = 150;  // ~1.5s per leg
 
+  // Standoff to break off to, at full energy. FleeNode holds this as a kiting leash rather than
+  // running, which is correct while healthy and wrong while hurt - so it is the *healthy* end of a
+  // ramp. The measured kill approach starts at a median 30.8 tiles and closes in three seconds, so
+  // an injured bot holding a fixed 30 recharges inside the kill funnel. See FleeDistanceNode.
   constexpr float kLeashDistance = 30.0f;
+  constexpr float kLeashDistanceHurt = 55.0f;
+  constexpr float kLeashHurtEnergyPercent = 0.35f;
+
+  // Below this FleeNode abandons the leash entirely and just opens distance. Raised from 0.20:
+  // bots died at 7.5-9.2% energy, and at 20% the killer is already inside 13 tiles.
+  constexpr float kFleePanicEnergyPercent = 0.3f;
 
   // Cruise at less than full speed unless committing to a kill or running. A ship already at
   // maximum has no acceleration left to dodge with and carries momentum it cannot cheaply reverse.
@@ -222,6 +233,7 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                 .End()
                 .Sequence(CompositeDecorator::Success) // Work out how close we should be fighting right now.
                     .Child<EngagementPumpNode>("engagement_range", kOrbitDistance, kPumpAmplitude, kPumpHalfPeriodTicks, "pump_outbound") //One base distance since nothing here varies it, plus the shared in-and-out pump. Published under the same key the movement below reads, so that block stays identical to FoursBehavior.
+                    .Child<FleeDistanceNode>("flee_distance", kLeashDistance, kLeashDistanceHurt, kLeashHurtEnergyPercent) //How far to break off scales with how hurt we are - a fixed 30 tiles held injured bots in the exact band killers start their run from
                     .Selector(CompositeDecorator::Success) // Hold something back unless we're committing to a kill or running for our life.
                         .Child<BlackboardSetQueryNode>("rushing")            //Pressing - commit everything
                         .InvertChild<TimerExpiredNode>("recharge_timer")     //Escaping - we want every bit of speed
@@ -267,7 +279,7 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                         .Child<BlackboardEraseNode>("rushing") //We're breaking off, so we are no longer pressing. Without this "rushing" is only cleared inside the aim-and-shoot Parallel below, which this branch skips entirely.
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds) //No team centroid to bias toward in a duel, so the escape direction is chosen purely on openness
-                            .Child<FleeNode>("nearest_aimshot", kLeashDistance, 5.0f, 0.2f, "nearest_target_energy")
+                            .Child<FleeNode>("nearest_aimshot", "flee_distance", 5.0f, kFleePanicEnergyPercent, "nearest_target_energy") //Distance scales with injury instead of being a fixed leash, and the panic threshold is raised - see FleeDistanceNode
                             .End()
                         .Sequence(CompositeDecorator::Success) // Keep shooting at whoever is chasing us. Backing off must not mean going silent - this branch takes the whole Selector, so the aim-and-shoot block below never runs while it is active. FleeNode already faces the threat while retreating, so the heading is right and this only needs permission to pull the trigger.
                             .Child<TimerExpiredNode>("match_startup")

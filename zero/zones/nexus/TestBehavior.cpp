@@ -25,6 +25,7 @@
 #include <zero/zones/nexus/nodes/NearestTeammateNode.h>
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
 #include <zero/zones/nexus/nodes/FleeNode.h>
+#include <zero/zones/nexus/nodes/FleeDistanceNode.h>
 #include <zero/zones/nexus/nodes/OrbitNode.h>
 #include <zero/zones/nexus/nodes/LocalAdvantageNode.h>
 #include <zero/zones/nexus/nodes/EngagementRangeNode.h>
@@ -247,7 +248,16 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // running away (recharge_timer), both exempted below.
   constexpr float kCruiseSpeedPercent = 0.8f;
 
+  // Healthy end of a ramp rather than a fixed leash - see FleeDistanceNode. Killers begin the run
+  // that lands a kill at a median 30.8 tiles and close it in three seconds, so an injured bot
+  // holding a fixed 30 was recharging inside the kill funnel.
   constexpr float kLeashDistance = 30.0f;
+  constexpr float kLeashDistanceHurt = 55.0f;
+  constexpr float kLeashHurtEnergyPercent = 0.35f;
+
+  // Below this FleeNode abandons the leash entirely and just opens distance. Raised from 0.20:
+  // bots died at 7.5-9.2% energy, and at 20% the killer is already inside 13 tiles.
+  constexpr float kFleePanicEnergyPercent = 0.3f;
 
   // Once within this distance of the target, stop closing further and circle instead - close
   // enough that they'll eventually fail to dodge a lobbed shot and we can dive in, far enough to
@@ -505,6 +515,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                 .Sequence(CompositeDecorator::Success) // Work out how close we should be fighting right now: the exchange favors closing hard at parity or better, and backing off while outnumbered.
                     .Child<LocalAdvantageNode>(kLocalAdvantageRadius, "local_advantage")
                     .Child<EngagementRangeNode>("local_advantage", "engagement_range", kOrbitDistance, kOutnumberedDistance, kPumpAmplitude, kPumpHalfPeriodTicks, "pump_outbound")
+                    .Child<FleeDistanceNode>("flee_distance", kLeashDistance, kLeashDistanceHurt, kLeashHurtEnergyPercent) //How far to break off scales with how hurt we are - a fixed 30 tiles held injured bots in the exact band killers start their run from
                     .Child<EnemiesNearTargetNode>("target", kMultifireClusterRadius, "enemies_near_target") //Drives the multifire toggle below
                     .Child<EnemiesNearTargetNode>("target", kRocketIsolationRadius, "enemies_near_target_wide") //Wider count, for "is this target actually on its own" - drives the rocket gate
                     .Selector(CompositeDecorator::Success) // Keep the team's centre of mass fresh for the flee bias below - or clear it outright if we're the last one alive, so we don't retreat toward a dead teammate's last position.
@@ -621,7 +632,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                             .End()
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "team_centroid") //Additive now - returns Failure so the flee below still runs and both forces sum
-                            .Child<FleeNode>("nearest_aimshot", kLeashDistance, 5.0f, 0.2f, "nearest_target_energy", "team_centroid", kFleeTeamBiasRadians) //The low-energy panic override has to be judged against whoever is chasing us. Pointing it at "target_energy" meant a bot fleeing a healthy enemy at 3 tiles could suppress its own panic because the distant focus target it happened to be shooting was weaker.
+                            .Child<FleeNode>("nearest_aimshot", "flee_distance", 5.0f, kFleePanicEnergyPercent, "nearest_target_energy", "team_centroid", kFleeTeamBiasRadians) //The low-energy panic override has to be judged against whoever is chasing us. Pointing it at "target_energy" meant a bot fleeing a healthy enemy at 3 tiles could suppress its own panic because the distant focus target it happened to be shooting was weaker.
                             .End()
                         .Sequence(CompositeDecorator::Success) // Keep shooting at whoever is chasing us. Backing off must not mean going silent - this branch takes the whole Selector, so the aim-and-shoot block below never runs while it is active, and without this a retreating bot fired nothing at all. In rec17 that produced a death spiral: outnumbered -> permanent retreat -> no return fire -> still outnumbered. The losing team fired 49-78 bullets all match against the winners' 136-239 and lost 12-0. FleeNode already faces the threat while retreating, so the heading is right and this only needs permission to pull the trigger.
                             .InvertChild<DistanceThresholdNode>("nearest_target_position", kMaxBulletRange)
