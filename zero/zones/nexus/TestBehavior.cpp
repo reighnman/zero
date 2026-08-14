@@ -425,53 +425,9 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // clang-format off
   builder
     .Selector()
-        // No queue sequence here, unlike the twos/threes/fours behaviors. This one runs in an open
-        // public arena rather than a queued X-vs-X match, so there is no "?next <n>v<n>pub" to join
-        // and nothing to re-queue into. Everything below is otherwise identical to FoursBehavior.
-        //
-        // The match_startup timer that the rest of the tree gates on is only ever set on leaving
-        // spectator mode, and TimerExpiredNode treats an unset key as already expired - so in a pub
-        // where the bot never sits in spec, those gates simply pass and the bot fights immediately.
-        .Sequence() // Don't do anything while in spec
-            .Child<PlayerFrequencyQueryNode>("self_freq")
-            .Child<EqualityNode<u16>>("self_freq", 8025)  //Check spec
-            .Child<ScalarNode>(1.0f, "spectating")
-            .End()
-        .Sequence() // Match startup begins when we get taken out of spec (since we sit in spec when waiting)
-            .Child<BlackboardSetQueryNode>("spectating")  //We just came out of spectating
-            .Child<TimerSetNode>("match_startup", 3000)  //Safety net only - Nexus.cpp expires this immediately once it sees the "GO!" match start message over private chat.
-            .Child<BlackboardEraseNode>("spectating")
-            .End()
-        .Sequence() // Enter the specified ship if not already in it and have been taken out of spec.
-            .InvertChild<TimerExpiredNode>("match_startup")            
+        .Sequence() // Enter the specified ship if not already in it.
             .InvertChild<ShipQueryNode>("request_ship")
             .Child<ShipRequestNode>("request_ship")
-            .End()
-        .Sequence()  // Fire 1 shot startup shot and set targets position to monitor for when they move so we can get out of the ready check loop
-            .InvertChild<TimerExpiredNode>("match_startup")      
-            .Child<TimerExpiredNode>("pre_fire")  // just needs to be longer than match_start
-            .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
-            .Child<InputActionNode>(InputAction::Bullet)
-            .Child<TimerSetNode>("pre_fire", 1500)
-            .End()
-        .Sequence() //Attach if someone is safe and we have full energy
-            .Child<BlackboardSetQueryNode>("tchat_safe")
-            .InvertChild<TimerExpiredNode>("tchat_safe_timer")
-            .Child<PlayerEnergyPercentThresholdNode>(1.0f)
-            .Child<TimerExpiredNode>("attach_cooldown")
-            .InvertChild<AttachedQueryNode>("self")
-            .Child<NearestTeammateNode>("nearest_teammate") 
-            .Child<PlayerPositionQueryNode>("nearest_teammate", "nearest_teammate_position")
-            .Child<DistanceThresholdNode>("nearest_teammate_position", kTeamRange) //If we're already near teammates dont run to them               
-            .Child<PlayerByNameNode>("tchat_safe", "tchat_safe_player")
-            .Child<AttachNode>("tchat_safe_player")
-            .Child<TimerSetNode>("attach_cooldown", 100)
-            .Child<BlackboardEraseNode>("tchat_safe")
-            .Child<BlackboardEraseNode>("tchat_safe_timer")
-            .End()
-        .Sequence() // Detach if attached
-            .Child<AttachedQueryNode>("self")
-            .Child<DetachNode>()
             .End()
            .Selector() // Choose to fight the player or follow waypoints.
             .Sequence() // Find nearest target and either path to them or seek them directly.              
@@ -633,7 +589,6 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                         .Child<DodgeIncomingDamage>(0.2f, 30.0f)
                         .End()
                     .Sequence() // Keep distance from the target during ready-check instead of sitting still until the match officially starts.
-                        .InvertChild<TimerExpiredNode>("match_startup")
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "team_centroid") //Additive now - returns Failure so the flee below still runs and both forces sum
                             .Child<FleeNode>("nearest_target_position", kLeashDistance, 5.0f, 0.2f, "nearest_target_energy")
@@ -668,7 +623,6 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                             .Child<FleeNode>("nearest_aimshot", kLeashDistance, 5.0f, 0.2f, "nearest_target_energy", "team_centroid", kFleeTeamBiasRadians) //The low-energy panic override has to be judged against whoever is chasing us. Pointing it at "target_energy" meant a bot fleeing a healthy enemy at 3 tiles could suppress its own panic because the distant focus target it happened to be shooting was weaker.
                             .End()
                         .Sequence(CompositeDecorator::Success) // Keep shooting at whoever is chasing us. Backing off must not mean going silent - this branch takes the whole Selector, so the aim-and-shoot block below never runs while it is active, and without this a retreating bot fired nothing at all. In rec17 that produced a death spiral: outnumbered -> permanent retreat -> no return fire -> still outnumbered. The losing team fired 49-78 bullets all match against the winners' 136-239 and lost 12-0. FleeNode already faces the threat while retreating, so the heading is right and this only needs permission to pull the trigger.
-                            .Child<TimerExpiredNode>("match_startup")
                             .InvertChild<DistanceThresholdNode>("nearest_target_position", kMaxBulletRange)
                             .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
                             .InvertChild<InputQueryNode>(InputAction::Bomb)
@@ -691,7 +645,6 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                         .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
                         .End()
                     .Sequence() // Aim at target and shoot while seeking them.
-                        .Child<TimerExpiredNode>("match_startup")
                         .Parallel()
                             .Child<FaceNode>("aimshot")
                             .Child<BlackboardEraseNode>("rushing") // Clear rushing status
@@ -788,7 +741,6 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                                     .End()
                                 .End()
                             .Sequence(CompositeDecorator::Success) // Bomb fire check.
-                                .Child<TimerExpiredNode>("match_startup") // Ensure match countdown timer has expired
                                 .Child<TimerExpiredNode>("recharge_timer")  // Ensure we're not still in a fleeing state
                                 .Child<VectorSubtractNode>("bomb_aimshot", "self_position", "target_direction", true) //check target aim
                                 .Child<PlayerVelocityQueryNode>("self_velocity") // get our current velocity
@@ -813,7 +765,6 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                                 .Child<InputActionNode>(InputAction::Bomb) // fire bomb
                                 .End()
                             .Sequence(CompositeDecorator::Success) // PB thor fire check.
-                                .Child<TimerExpiredNode>("match_startup")
                                 .InvertChild<PlayerEnergyPercentThresholdNode>(0.25f)  //If we are low energy            
                                 .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Thor)  //If we can thor
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Thor)  //If its not on cd
@@ -829,8 +780,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                                 .Child<RayRectangleInterceptNode>("thor_fire_ray", "target_bounds")
                                 .Child<InputActionNode>(InputAction::Thor) //Thor
                                 .End()
-                            .Sequence(CompositeDecorator::Success) // Determine if a shot should be fired by using weapon trajectory and bounding boxes.
-                                .Child<TimerExpiredNode>("match_startup") // Ensure match countdown timer has expired            
+                            .Sequence(CompositeDecorator::Success) // Determine if a shot should be fired by using weapon trajectory and bounding boxes.           
                                 .Child<TimerExpiredNode>("recharge_timer") // Ensure we're not still in a fleeing state
                                 .InvertChild<DistanceThresholdNode>("target_position", kMaxBulletRange) // Don't spray at ranges where bullets essentially never connect
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
