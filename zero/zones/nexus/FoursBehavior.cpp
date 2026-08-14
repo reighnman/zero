@@ -648,6 +648,18 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .End()
                     .Child<BlackboardEraseNode>("finishing")
                     .End()
+                .Sequence(CompositeDecorator::Success) // A rocket lit to escape has to be seen through to the end of its burn.
+                    .Child<BlackboardSetQueryNode>("rocket_defensive")
+                    .Selector()
+                        .Sequence() // Still burning - stay committed to the retreat, whatever else the tree decided this tick.
+                            .Child<RocketActiveQueryNode>()
+                            .Child<TimerSetNode>("recharge_timer", 200)
+                            .Child<BlackboardEraseNode>("finishing") //Nothing is worth turning back into at the speed a rocket carries
+                            .Child<BlackboardEraseNode>("rushing")
+                            .End()
+                        .Child<BlackboardEraseNode>("rocket_defensive") //Burn finished, free to fight again
+                        .End()
+                    .End()
                 .Selector()
                     .Sequence() // Attempt to dodge and use defensive items.
                         .Sequence(CompositeDecorator::Success) // Always check incoming damage so we can use it in repel and portal sequences.
@@ -704,6 +716,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                             .Child<TimerExpiredNode>("rocket_timer")
                             .Child<InputActionNode>(InputAction::Rocket)
                             .Child<TimerSetNode>("rocket_timer", 1500)
+                            .Child<ScalarNode>(1.0f, "rocket_defensive")  //Mark this burn as an escape, so the retreat is held for its whole duration - see the hold block above the fight/flee Selector
                             .End()
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "team_centroid") //Additive now - returns Failure so the flee below still runs and both forces sum
