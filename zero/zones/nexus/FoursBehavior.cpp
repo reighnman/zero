@@ -35,6 +35,7 @@
 #include <zero/zones/nexus/nodes/MineAvailableNode.h>
 #include <zero/zones/nexus/nodes/EnemiesNearTargetNode.h>
 #include <zero/zones/nexus/nodes/TeamFocusTargetNode.h>
+#include <zero/zones/nexus/nodes/PursuedFromBehindNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
@@ -166,6 +167,16 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // too far and they simply steer around it.
   constexpr float kMineMinPursuerDistance = 7.0f;
   constexpr float kMineMaxPursuerDistance = 16.0f;
+  // The chaser has to actually be behind us and running us down. Being at speed inside a distance
+  // band - all the first cut checked - does not distinguish running away from running in, and the
+  // bots duly used mines offensively: in rec11 four of seven laid them while closing on the enemy
+  // at 17-23 tiles/sec (radial -16.7 to -23.0), against the human's +19.2/+19.5 flat-out retreats.
+  constexpr float kMineRearConeDegrees = 120.0f;
+  constexpr float kMinePursuitClosingSpeed = 6.0f;
+  // Don't spend the one mine we get, plus its fire cost, unless we're healthy enough that surviving
+  // the exchange is still the plan. Note this is a deliberately conservative rule rather than a
+  // copy of the human, who laid his at 5-12% energy as a last resort.
+  constexpr float kMineMinEnergyPercent = 0.75f;
 
   // --- Multifire ---
   // Multifire fans the shot instead of firing a single line: more energy per trigger, worse against
@@ -288,6 +299,13 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   constexpr float kAvoidTeamDistance = 6.0f;
 
   // How close a wall needs to be before we override movement to steer clear of it while fleeing.
+  // How far ahead, in seconds of travel, to look for terrain we're about to run into. A fixed
+  // 5-tile radius is a quarter of a second of warning at fighting speed - far too late to turn a
+  // ship carrying real momentum, which is how bots ended up wedged in pockets and then died on the
+  // way out. Detection now scales with actual speed; kWallCheckDistance stays as the contact-range
+  // backstop.
+  constexpr float kWallLookaheadSeconds = 0.9f;
+
   constexpr float kWallCheckDistance = 5.0f;
   // How far out to search for an opening once a wall is too close.
   constexpr float kWallOpeningDistance = 35.0f;
@@ -491,14 +509,16 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                     .Sequence() // Keep distance from the target during ready-check instead of sitting still until the match officially starts.
                         .InvertChild<TimerExpiredNode>("match_startup")
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
-                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "team_centroid") //Additive now - returns Failure so the flee below still runs and both forces sum
                             .Child<FleeNode>("nearest_target_position", kLeashDistance, 5.0f, 0.2f, "target_energy")
                             .End()
                         .End()
                     .Sequence()  //Keep enemy distance while reacharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
-                        .Sequence(CompositeDecorator::Success) // Drop a mine behind us to make a chaser break off - only while genuinely running, at speed, with them close but not on top of us.
+                        .Sequence(CompositeDecorator::Success) // Drop a mine into our wake, only for a chaser actually running us down from behind.
+                            .Child<PlayerEnergyPercentThresholdNode>(kMineMinEnergyPercent)
                             .Child<AtMaxSpeedNode>(kRocketMinSpeedPercent)
+                            .Child<PursuedFromBehindNode>("target", kMineRearConeDegrees, kMinePursuitClosingSpeed) //A mine only ever threatens someone who drives into it, so it has to be behind us and closing
                             .Child<DistanceThresholdNode>("target_position", "self_position", kMineMinPursuerDistance)
                             .InvertChild<DistanceThresholdNode>("target_position", "self_position", kMineMaxPursuerDistance)
                             .Child<TimerExpiredNode>("mine_timer")
@@ -516,7 +536,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                             .Child<TimerSetNode>("rocket_timer", 1500)
                             .End()
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
-                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "team_centroid") //Additive now - returns Failure so the flee below still runs and both forces sum
                             .Child<FleeNode>("nearest_aimshot", kLeashDistance, 5.0f, 0.2f, "target_energy", "team_centroid", kFleeTeamBiasRadians)
                             .End()
                         .End()
@@ -584,6 +604,9 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                     .End()
                                 .Sequence(CompositeDecorator::Success)
                                     .InvertChild<BlackboardSetQueryNode>("rushing")
+                                    .Sequence(CompositeDecorator::Success) // Bake terrain into the attack movement too - additive, so it steers us around walls while still closing/orbiting rather than replacing the attack. Wrapped so its Failure doesn't abort this sequence.
+                                        .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "target_position")
+                                        .End()
                                     .Selector()
                                         .Sequence() // Rejoin the team when we've drifted off it - still faces/fires/juke-dodges via this Parallel instead of running blind.
                                             .Child<TeamCentroidNode>("team_centroid") //Anchor on where the team actually is, not on one teammate who is themselves running somewhere else
