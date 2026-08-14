@@ -157,6 +157,12 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   // Terrain handling. Detection scales with actual speed rather than a fixed radius, so the push
   // out of a pocket starts while there is still somewhere to go instead of once already wedged.
   constexpr float kWallLookaheadSeconds = 0.9f;
+  // Fleeing gets a much longer horizon. 0.9s is about 17 tiles at retreat speed - enough to avoid
+  // running into a wall, but not enough to avoid COMMITTING TO A DIRECTION THAT DEAD ENDS, which is
+  // a different failure. A retreat runs to 30-55 tiles (FleeDistanceNode), so a corridor that closes
+  // at 20 tiles reads as clear when the direction is chosen and the problem only appears once we are
+  // inside the pocket with the opponent behind us. 2.4s reaches ~45 tiles at retreat speed.
+  constexpr float kFleeWallLookaheadSeconds = 2.4f;
   constexpr float kWallCheckDistance = 5.0f;
   constexpr float kWallOpeningDistance = 35.0f;
 
@@ -297,7 +303,7 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                     .Sequence() // Keep distance during ready-check instead of sitting still until the match officially starts.
                         .InvertChild<TimerExpiredNode>("match_startup")
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
-                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds) //Additive - returns Failure so the flee below still runs and both forces sum
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kFleeWallLookaheadSeconds) //Long flee horizon - a retreat commits to 30-55 tiles, so the cast has to reach that far or we pick a corridor that dead ends
                             .Child<FleeNode>("nearest_target_position", kLeashDistance, 5.0f, 0.2f, "nearest_target_energy")
                             .End()
                         .End()
@@ -313,11 +319,12 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                             .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
                             .Child<TimerExpiredNode>("reverse_bomb_timer")
                             .InvertChild<TileQueryNode>(kTileIdSafe)
+                            //No wake-blast guard here, unlike the team trees: a duel has no teammates to catch the blast, and self is covered by the fact we are receding from the bomb at retreat speed the whole time the opponent is closing on it.
                             .Child<InputActionNode>(InputAction::Bomb)
                             .Child<TimerSetNode>("reverse_bomb_timer", kReverseBombCooldownTicks)
                             .End()
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
-                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds) //No team centroid to bias toward in a duel, so the escape direction is chosen purely on openness
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kFleeWallLookaheadSeconds) //No team centroid to bias toward in a duel, so the escape direction is chosen purely on openness. Long flee horizon for the same reason as the team trees.
                             .Child<FleeNode>("nearest_aimshot", "flee_distance", 5.0f, kFleePanicEnergyPercent, "nearest_target_energy") //Distance scales with injury instead of being a fixed leash, and the panic threshold is raised - see FleeDistanceNode
                             .End()
                         .Sequence(CompositeDecorator::Success) // Keep shooting at whoever is chasing us. Backing off must not mean going silent - this branch takes the whole Selector, so the aim-and-shoot block below never runs while it is active. FleeNode already faces the threat while retreating, so the heading is right and this only needs permission to pull the trigger.

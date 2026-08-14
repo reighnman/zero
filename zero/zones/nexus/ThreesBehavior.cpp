@@ -39,6 +39,7 @@
 #include <zero/zones/nexus/nodes/MineAvailableNode.h>
 #include <zero/zones/nexus/nodes/EnemiesNearTargetNode.h>
 #include <zero/zones/nexus/nodes/TeamFocusTargetNode.h>
+#include <zero/zones/nexus/nodes/NearestTeammatePlayerPositionQueryNode.h>
 #include <zero/zones/nexus/nodes/PursuedFromBehindNode.h>
 #include <zero/zones/nexus/nodes/CruiseSpeedNode.h>
 #include <zero/zones/nexus/nodes/TargetEnergyPercentThresholdNode.h>
@@ -426,6 +427,55 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
   // metric a cover-fire weapon should be tuned on.
   constexpr float kBombProximityMultiplier = 8.0f;
 
+  // Wake weapons - the mine and the reverse-retreat bomb - detonate essentially where WE are rather
+  // than at an aim point downrange, so BombBlastSafetyNode cannot check them: it measures a lane
+  // from self to an aim position and counts self as a friendly, and with the detonation site sitting
+  // on top of us it would veto every shot. What it can't see is also what matters least here - we
+  // are receding from that point at retreat speed the whole time the pursuer is closing on it, so
+  // the self term is not merely unhelpful, it evaluates the wrong position. A TEAMMATE is the real
+  // hazard, in two distinct places, and both are checked: one standing where we just were, and one
+  // sitting on the chaser who is about to trip the fuse - a teammate riding the same enemy we are
+  // mining is inside the blast at the moment they set it off.
+  //
+  // The aimed bombs (close-range check and long-range lob) don't need this: BombBlastSafetyNode
+  // already tests friendlies at the aim point and at any point an enemy would trip the fuse early,
+  // which is the same "teammate sitting on the target" question asked properly.
+  constexpr float kWakeBlastSafeDistance = 12.0f;
+  // Thor is deliberately exempt from all of this. It is a point-blank finisher fired inside 8 tiles
+  // at an already-dying target, it is scarce (~2.5 per player per match), and any blast test - self
+  // or friendly - would veto it at the range it is meant to be used, deleting the branch rather than
+  // making it safer.
+
+  // --- Long-range bomb lob ---
+  // Energy sitting at full is energy thrown away. rec31: self energy while closing runs median 0.9
+  // with p75 and p90 both at 1.0, so bots spend a large share of every approach with a completely
+  // full tank - while firing bombs at a median of only 0.6 energy, i.e. saving the cheap surplus and
+  // then spending from the reserve later. The whole team managed ~96 bombs against phong's 83 on his
+  // own.
+  //
+  // The fix is a second, separate bomb branch for the approach specifically. The existing bomb check
+  // is a close-quarters weapon: it requires bullets already overlapping the target
+  // (kBombRequiredDamageOverlap) and caps at 50 tiles, which is right for "put a bomb into a
+  // firefight I am already in" and by construction never fires on the way in.
+  //
+  // This one only ever spends SURPLUS. Above kLobBombMinEnergyPercent the recharge is topped out and
+  // the energy has nowhere to go, so a bomb is close to free; below it, the bomb is competing with
+  // staying alive and this branch stops.
+  constexpr float kLobBombMinEnergyPercent = 0.85f;
+  // Starts outside the engagement band (kOrbitDistance 14.4 + pump) so this never competes with the
+  // close-range bomb check, and reaches out past the 45-tile approach it is meant for.
+  constexpr float kLobBombMinDistance = 25.0f;
+  constexpr float kLobBombMaxDistance = 60.0f;
+  // Must actually be heading in. A bomb lobbed while drifting away arrives late and behind them,
+  // and this is meant for the run back into a fight, not for kiting at range.
+  constexpr float kLobBombMinClosingSpeed = 5.0f;
+  // Deliberately generous: at this range the shot is area denial into a group, not a duel with one
+  // ship. Landing near the fight is the point, and the blast does the rest.
+  constexpr float kLobBombProximityMultiplier = 14.0f;
+  // ~1.2s. Frequent enough to matter on a long approach, slow enough that it cannot drain the tank
+  // it is spending the surplus of.
+  constexpr u32 kLobBombCooldownTicks = 120;
+
   // Burst-fire pacing (a 0.3s firing window followed by a forced ~1s pause) used to live here and
   // has been removed, because the corpus says it was modelling a habit that doesn't exist and
   // costing us the one thing that actually separates strong players from weak ones.
@@ -474,6 +524,17 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
   // way out. Detection now scales with actual speed; kWallCheckDistance stays as the contact-range
   // backstop.
   constexpr float kWallLookaheadSeconds = 0.9f;
+  // Fleeing gets its own, much longer horizon. 0.9s is about 17 tiles at retreat speed, which is
+  // enough to avoid running into a wall but not enough to avoid COMMITTING TO A DIRECTION THAT DEAD
+  // ENDS - and those are different failures. A retreat runs to 30-55 tiles (FleeDistanceNode), so a
+  // corridor that closes at 20 tiles looks completely clear when the retreat direction is chosen,
+  // and the bot only discovers the problem once it is inside the pocket with a chaser behind it.
+  //
+  // rec31 measured the result: bots died with a median 2-5 tiles of wall clearance (phong 21), spent
+  // 12.6-18.2% of their time with 3 tiles of room or less (phong 7.0%), and bounced off terrain
+  // 5.8-8.9 times a minute (phong 2.5). At 2.4s the cast reaches ~45 tiles at retreat speed, which
+  // is the distance actually being committed to.
+  constexpr float kFleeWallLookaheadSeconds = 2.4f;
 
   constexpr float kWallCheckDistance = 5.0f;
   // How far out to search for an opening once a wall is too close.
@@ -774,7 +835,7 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                     .Sequence() // Keep distance from the target during ready-check instead of sitting still until the match officially starts.
                         .InvertChild<TimerExpiredNode>("match_startup")
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
-                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "team_centroid") //Additive now - returns Failure so the flee below still runs and both forces sum
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kFleeWallLookaheadSeconds, "team_centroid") //Long flee horizon - a retreat commits to 30-55 tiles, so the cast has to reach that far or we pick a corridor that dead ends. Additive unless actually cornered, in which case it takes the Selector and the flee below is skipped so nothing pushes us back into the pocket.
                             .Child<FleeNode>("nearest_target_position", kLeashDistance, 5.0f, 0.2f, "nearest_target_energy")
                             .End()
                         .End()
@@ -789,6 +850,14 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                             .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", kMineMaxPursuerDistance)
                             .Child<TimerExpiredNode>("mine_timer")
                             .Child<MineAvailableNode>()
+                            .Selector() // Nothing of ours close enough to eat the blast where this will sit. Succeeds outright when no teammate is alive, which is when a wake weapon is safest.
+                                .InvertChild<NearestTeammatePlayerPositionQueryNode>("wake_teammate_position")
+                                .Child<DistanceThresholdNode>("wake_teammate_position", "self_position", kWakeBlastSafeDistance)
+                                .End()
+                            .Selector() // ...and nobody of ours sitting on the chaser who is going to set it off. A teammate riding the same enemy we're mining is inside the blast when they trip it.
+                                .InvertChild<NearestTeammatePlayerPositionQueryNode>("nearest_target", "wake_target_teammate_position")
+                                .Child<DistanceThresholdNode>("wake_target_teammate_position", "nearest_target_position", kWakeBlastSafeDistance)
+                                .End()
                             .Child<InputActionNode>(InputAction::Mine)
                             .Child<TimerSetNode>("mine_timer", 500)
                             .End()
@@ -802,11 +871,19 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                             .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
                             .Child<TimerExpiredNode>("reverse_bomb_timer")
                             .InvertChild<TileQueryNode>(kTileIdSafe)
+                            .Selector() // Same wake-blast guard as the mine - this bomb barely travels, so it goes off roughly where we are standing now
+                                .InvertChild<NearestTeammatePlayerPositionQueryNode>("wake_teammate_position")
+                                .Child<DistanceThresholdNode>("wake_teammate_position", "self_position", kWakeBlastSafeDistance)
+                                .End()
+                            .Selector() // ...and nobody of ours sitting on the chaser who is going to set it off
+                                .InvertChild<NearestTeammatePlayerPositionQueryNode>("nearest_target", "wake_target_teammate_position")
+                                .Child<DistanceThresholdNode>("wake_target_teammate_position", "nearest_target_position", kWakeBlastSafeDistance)
+                                .End()
                             .Child<InputActionNode>(InputAction::Bomb)
                             .Child<TimerSetNode>("reverse_bomb_timer", kReverseBombCooldownTicks)
                             .End()
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
-                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "team_centroid") //Additive now - returns Failure so the flee below still runs and both forces sum
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kFleeWallLookaheadSeconds, "team_centroid") //Long flee horizon - a retreat commits to 30-55 tiles, so the cast has to reach that far or we pick a corridor that dead ends. Additive unless actually cornered, in which case it takes the Selector and the flee below is skipped so nothing pushes us back into the pocket.
                             .Child<FleeNode>("nearest_aimshot", "flee_distance", 5.0f, kFleePanicEnergyPercent, "nearest_target_energy", "team_centroid", kFleeTeamBiasRadians) //Distance now scales with injury instead of being a fixed leash, and the panic threshold is raised - see FleeDistanceNode. The low-energy panic override is judged against whoever is chasing us; pointing it at "target_energy" meant a bot fleeing a healthy enemy at 3 tiles could suppress its own panic because the distant focus target it happened to be shooting was weaker.
                             .End()
                         .Sequence(CompositeDecorator::Success) // Keep shooting at whoever is chasing us. Backing off must not mean going silent - this branch takes the whole Selector, so the aim-and-shoot block below never runs while it is active, and without this a retreating bot fired nothing at all. In rec17 that produced a death spiral: outnumbered -> permanent retreat -> no return fire -> still outnumbered. The losing team fired 49-78 bullets all match against the winners' 136-239 and lost 12-0. FleeNode already faces the threat while retreating, so the heading is right and this only needs permission to pull the trigger.
@@ -962,6 +1039,32 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                                 .Child<RenderRayNode>("world_camera", "bomb_fire_ray", 50.0f, Vector3f(1.0f, 1.0f, 0.0f))
                                 .Child<RayRectangleInterceptNode>("bomb_fire_ray", "target_bounds")
                                 .Child<InputActionNode>(InputAction::Bomb) // fire bomb
+                                .End()
+                            .Sequence(CompositeDecorator::Success) // Lob bombs into the fight on the way in, paid for out of surplus energy that would otherwise sit at full and be wasted - see kLobBombMinEnergyPercent.
+                                .Child<TimerExpiredNode>("match_startup")
+                                .Child<TimerExpiredNode>("recharge_timer") // not while breaking off - that's the reverse-retreat bomb's job, and it wants the opposite geometry
+                                .InvertChild<InputQueryNode>(InputAction::Bomb) // the close-range bomb check above already fired this tick
+                                .InvertChild<InputQueryNode>(InputAction::Thor)
+                                .Child<PlayerEnergyPercentThresholdNode>(kLobBombMinEnergyPercent) // surplus only
+                                .Child<DistanceThresholdNode>("target_position", "self_position", kLobBombMinDistance) // outside the engagement band, so this never overlaps the close-range check
+                                .InvertChild<DistanceThresholdNode>("target_position", "self_position", kLobBombMaxDistance)
+                                .Child<VectorSubtractNode>("bomb_aimshot", "self_position", "lob_target_direction", true)
+                                .Child<PlayerVelocityQueryNode>("self_velocity")
+                                .Child<VectorDotNode>("self_velocity", "lob_target_direction", "lob_forward_velocity") // recomputed rather than reusing the close-range block's value, which is stale whenever that block exited early
+                                .Child<ScalarThresholdNode<float>>("lob_forward_velocity", kLobBombMinClosingSpeed) // actually running back in, not drifting off
+                                .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb)
+                                .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
+                                .Child<TimerExpiredNode>("lob_bomb_timer")
+                                .InvertChild<TileQueryNode>(kTileIdSafe)
+                                .Child<BombBlastSafetyNode>("bomb_aimshot", kBombFriendlyBlastMargin) // a lob into a group is exactly where a teammate can be standing
+                                .Child<ShotLineOfSightNode>("bomb_aimshot", 0.0f, true) // long lane, so terrain matters more here than anywhere else. Proximity-aware: the fuse trips on the ship, so only the lane up to prox range has to be clear.
+                                .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "lob_fire_velocity")
+                                .Child<RayNode>("self_position", "lob_fire_velocity", "lob_fire_ray")
+                                .Child<DynamicPlayerBoundingBoxQueryNode>("target", "lob_target_bounds", kLobBombProximityMultiplier) // area denial into a group, not a precise shot at one ship
+                                .Child<MoveRectangleNode>("lob_target_bounds", "bomb_aimshot", "lob_target_bounds")
+                                .Child<RayRectangleInterceptNode>("lob_fire_ray", "lob_target_bounds")
+                                .Child<InputActionNode>(InputAction::Bomb)
+                                .Child<TimerSetNode>("lob_bomb_timer", kLobBombCooldownTicks)
                                 .End()
                             .Sequence(CompositeDecorator::Success) // PB thor fire check.
                                 .Child<TimerExpiredNode>("match_startup")
