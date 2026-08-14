@@ -23,20 +23,38 @@
 #include <zero/zones/svs/nodes/MemoryTargetNode.h>
 #include <zero/zones/svs/nodes/NearbyEnemyWeaponQueryNode.h>
 #include <zero/zones/nexus/nodes/NearestTeammateNode.h>
-#include <zero/zones/nexus/nodes/NearestTeammatePlayerPositionQueryNode.h>
-#include <zero/zones/nexus/nodes/EnergyDisadvantageNode.h>
 #include <zero/zones/nexus/nodes/LowestTargetNode.h>
+#include <zero/zones/nexus/nodes/FleeNode.h>
 #include <zero/zones/nexus/nodes/OrbitNode.h>
-#include <zero/zones/nexus/nodes/BroadsideFaceNode.h>
+#include <zero/zones/nexus/nodes/LocalAdvantageNode.h>
+#include <zero/zones/nexus/nodes/EngagementRangeNode.h>
+#include <zero/zones/nexus/nodes/BombBlastSafetyNode.h>
+#include <zero/zones/nexus/nodes/TeamCentroidNode.h>
+#include <zero/zones/nexus/nodes/IncomingBlastDamageNode.h>
+#include <zero/zones/nexus/nodes/RocketUsageNode.h>
+#include <zero/zones/nexus/nodes/MineAvailableNode.h>
+#include <zero/zones/nexus/nodes/EnemiesNearTargetNode.h>
+#include <zero/zones/nexus/nodes/TeamFocusTargetNode.h>
+#include <zero/zones/nexus/nodes/PursuedFromBehindNode.h>
+#include <zero/zones/nexus/nodes/CruiseSpeedNode.h>
+#include <zero/zones/nexus/nodes/TargetEnergyPercentThresholdNode.h>
+#include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
+#include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
+#include <zero/zones/nexus/nodes/DodgeJukeNode.h>
+#include <zero/zones/nexus/nodes/EnergyDisadvantageNode.h>
+#include <zero/zones/nexus/nodes/TargetEnergyDropNode.h>
+#include <zero/zones/nexus/nodes/ShotLineOfSightNode.h>
+#include <zero/zones/nexus/nodes/BombImpactLikelihoodNode.h>
+#include <zero/zones/nexus/nodes/TargetOpeningRangeNode.h>
+#include <zero/zones/nexus/nodes/FinishableTargetNode.h>
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
-#include <zero/zones/nexus/nodes/FleeNode.h>
 #include <zero/zones/nexus/nodes/PredictiveAimNode.h>
-#include <zero/zones/nexus/nodes/ShotSpreadNode.h>
 #include <zero/zones/nexus/nodes/TargetAccelerationNode.h>
-#include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 
+#include <zero/zones/nexus/Nexus.h>
 #include "TestBehavior.h"
+
 
 using namespace zero::svs;
 
@@ -56,7 +74,13 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
 
   // Don't dodge below this
   constexpr float kLowEnergyRushThreshold = 400.0f;  // Rush threshold
-  constexpr float kRushDistanceThreshold = 10.0f;    // We will rush if someone is low energy within this range
+  // We will rush if someone is low energy within this range. Replay kills are landed off a
+  // committed, accelerating dive that *starts* well outside knife range - median killer-to-victim
+  // range runs 27t at 2s before the kill, 20t at 1s, 15.7t at 0.5s, 11.4t when it lands, with the
+  // killer's speed climbing 14.7 -> 16.9 tiles/sec across that window. Only committing once already
+  // inside 10 tiles means never reproducing that dive at all, since by then the kill has either
+  // happened or the target has slipped away.
+  constexpr float kRushDistanceThreshold = 20.0f;
   constexpr u32 kRushRepelThreshold = 1;             // If we don't have this many reps dont rush targets
   // Only press a target we've spotted as low energy ourselves if we have enough energy left to
   // commit to closing the distance - otherwise we'd be diving in already weak.
@@ -69,14 +93,303 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // bombing so it overlaps bullets and is harder to dodge.
   constexpr float kBombRequiredDamageOverlap = 300.0f;
 
-  // How far away a target needs to be before we start varying our shots around the target.
-  constexpr float kShotSpreadDistanceThreshold = 40.0f;
+  // Extra clearance beyond the bomb's actual blast radius before we're willing to fire one, since
+  // both we and the teammate keep moving during the bomb's flight and the detonation point is only
+  // ever an estimate. With a typical BombExplodePixels this lands the effective keep-out at roughly
+  // the 12 tiles the old (single-friendly) check used, while now applying to every teammate and to
+  // early detonations along the flight path rather than to one player at the target.
+  //
+  // Humans are far more conservative than even this: their 25th-percentile distance from the target
+  // to their own nearest teammate when bombing is 24 tiles, against 17 for the bot. This margin is
+  // deliberately not raised to match, because much of that human gap is just teammates being spread
+  // out rather than a deliberate hold - what the corpus actually shows them doing is *discriminating
+  // by weapon*, firing bombs into an occupied lane less often than bullets, which is the behavior
+  // this gate restores.
+  constexpr float kBombFriendlyBlastMargin = 6.0f;
 
-  // How much a maneuvering target's acceleration is allowed to bend the aim lead, capped by flight time.
+  // Closing speed toward the target required before we'll fire a bomb. This used to be 2.0, which
+  // silently made bombing almost impossible: while orbiting, our velocity is tangential, so the
+  // component along the aim line sits near zero and the gate never opened. Together with a flat
+  // 12-tile minimum range that exactly matched the 12-tile orbit distance, it left the bot with
+  // almost no window in which it was allowed to bomb at all - in the 1-human-vs-7-bots replays the
+  // human fired 71 bombs while the bot he isolated fired 2.
+  //
+  // The requirement existed so the bomb would carry our forward momentum, but PredictiveAimNode now
+  // solves the lead in our own reference frame and accounts for ship velocity properly, so a
+  // tangential launch is aimed correctly rather than drifting. All that's left worth excluding is
+  // lobbing one while actively reversing away from the target. The 12-tile floor is dropped
+  // outright: BombBlastSafetyNode already keeps us outside our own blast using the real
+  // BombExplodePixels radius, which is what that number was standing in for.
+  constexpr float kBombMinForwardVelocity = 0.0f;
+
+  // --- Rockets ---
+  // A rocket is a short burst of extra thrust and a raised speed cap. It only converts into real
+  // distance if we're already near our normal top speed - lit from slow, most of the burn is spent
+  // reaching a speed we'd have reached anyway, and while chasing it also risks sailing straight past
+  // the target. So both uses below require us to already be moving.
+  constexpr float kRocketMinSpeedPercent = 0.8f;
+  // Chasing: only worth it if there's a real gap to close. Raised from 12 after the first live test
+  // came out visibly rocket-happy - at that range we were spending a limited item to cover ground
+  // ordinary thrust would have covered, and then overshooting the target. This branch already sits
+  // inside the rush sequence, so a rocket now means specifically "we are pressing a target we know
+  // is weak, and it is far enough away to be getting off the hook".
+  // A rocket is for finishing something already nearly dead, on its own, while we can afford the
+  // dive - not for closing any gap that happens to be open. Live testing showed them going out far
+  // too freely, so the gate is now four conjunctive conditions rather than distance and speed alone.
+  //
+  // Target energy is a percent of that ship's own max rather than an absolute, for the same reason
+  // TargetEnergyPercentThresholdNode exists at all: a flat number means something different on
+  // every ship and bounty.
+  constexpr float kRocketTargetEnergyPercent = 0.20f;
+  constexpr float kRocketMinSelfEnergyPercent = 0.6f;
+  // "Isolated" means nobody of theirs within this radius. The count includes the target itself, so
+  // the gate fires only when the count is below 2.
+  // Widened from 20. "Isolated" has to mean isolated at the scale we're about to travel, and a
+  // rocket covers 16-35 tiles - an enemy 22 tiles from the target was well inside the dive and was
+  // being ignored.
+  constexpr float kRocketIsolationRadius = 30.0f;
+  constexpr float kRocketMaxEnemiesNearTarget = 2.0f;
+  // The gate that distance and speed alone could never express: only rocket at something that is
+  // actually running away from us. A target holding station in its own team looks identical to a
+  // fleeing one under a distance check, and rocketing at it is precisely the dive-into-a-crowd
+  // behavior seen in play - we arrive at speed, in a group, with no thrust left to turn around.
+  constexpr float kRocketMinOpeningSpeed = 3.0f;
+  // Rockets also require a positive local head-count, not merely a non-negative one. At parity the
+  // exchange is roughly even and there's nothing a limited item buys; committing one only makes
+  // sense when we're up bodies and a kill actually converts into an advantage.
+  constexpr float kRocketMinAdvantage = 1.0f;  // ScalarThresholdNode compares >=, so this is "+1 or better"
+
+  constexpr float kRocketChaseMinDistance = 16.0f;
+  constexpr float kRocketChaseMaxDistance = 35.0f;
+  // Escaping: only once whoever is chasing is genuinely running us down, not merely following.
+  constexpr float kRocketEscapeDistance = 12.0f;
+
+  // --- Mines ---
+  // Measured off the human in the bot-vs-human replays: he laid exactly one mine per match, both
+  // times at 5-12% energy with a pursuer ~10 tiles back while running at ~20 tiles/sec with nearly
+  // all of that speed pointed straight away. It's an escape tool - dropped to make a chaser break
+  // off - not an area-denial one. Too close and we're still inside our own blast when it goes off;
+  // too far and they simply steer around it.
+  constexpr float kMineMinPursuerDistance = 7.0f;
+  constexpr float kMineMaxPursuerDistance = 16.0f;
+  // The chaser has to actually be behind us and running us down. Being at speed inside a distance
+  // band - all the first cut checked - does not distinguish running away from running in, and the
+  // bots duly used mines offensively: in rec11 four of seven laid them while closing on the enemy
+  // at 17-23 tiles/sec (radial -16.7 to -23.0), against the human's +19.2/+19.5 flat-out retreats.
+  constexpr float kMineRearConeDegrees = 120.0f;
+  constexpr float kMinePursuitClosingSpeed = 6.0f;
+  // Don't spend the one mine we get, plus its fire cost, unless we're healthy enough that surviving
+  // the exchange is still the plan. Note this is a deliberately conservative rule rather than a
+  // copy of the human, who laid his at 5-12% energy as a last resort.
+  constexpr float kMineMinEnergyPercent = 0.75f;
+
+  // --- Multifire ---
+  // Multifire fans the shot instead of firing a single line: more energy per trigger, worse against
+  // one target, better when several are bunched and a spread can catch more than one. Enemies
+  // within this radius of the target count as a cluster worth fanning into.
+  constexpr float kMultifireClusterRadius = 5.0f;
+  constexpr float kMultifireMinEnemies = 2.0f;
+  // Don't pay the extra cost per shot while we're short on energy.
+  constexpr float kMultifireMinEnergyPercent = 0.5f;
+
+  // Don't take bullet shots past this. Two things made long-range fire actively wasteful rather
+  // than merely low-value: the aim solver was under-leading (fixed in PredictiveAimNode), and
+  // beyond 40 tiles the tree was deliberately wobbling the aimpoint by up to 3 tiles via
+  // ShotSpreadNode - so the bot was spraying randomized shots exactly where they were least likely
+  // to land. Measured bullet hit rate is 7.4% at 35-39 tiles and below 7% past that, against
+  // 13-16% at 15-19 and 33% at 10-14.
+  //
+  // This is set to trim the wasteful tail (the bot's 90th-percentile firing range was 53 tiles),
+  // not to make the bot stingy. It deliberately isn't pulled in much further: volume of fire is the
+  // one metric that separated winning from losing players in the replay corpus (24.0 vs 19.2
+  // shots/min alive), so cutting deep into ordinary firing range would imitate the losing half.
+  constexpr float kMaxBulletRange = 35.0f;
+
+  //  If an enemy is near us and we're low energy thor if below this value
+  constexpr float kThorEnemyThreshold = 200.0f;
+
+  // How close a target has to be before we'll take a bullet shot whose direct lane is blocked by
+  // terrain, betting on a bounce. Bullets bounce in this arena, so a blocked lane isn't automatically
+  // a wasted shot - but a ricochet only has a real chance while the geometry is tight and the
+  // remaining travel is short, so this sits just outside the engagement pump's inner edge (10.4).
+  // Bombs get no equivalent allowance; see ShotLineOfSightNode.
+  constexpr float kBulletBounceRange = 12.0f;
+
+  // How far away from a teammate before we regroup (attach-to-safe-teammate check only).
+  constexpr float kTeamRange = 40.0f;
+
+  // How far we're willing to drift from the team's centre of mass before rejoining it.
+  //
+  // The old rule fired at 40 tiles from a single teammate, which is far too late: in the 12-0
+  // bot-vs-human replay every death happened with no teammate at all inside 25 tiles, at a median
+  // 58.6 tiles from the nearest one. By the time a 40-tile pairwise check trips, the bot is already
+  // in the situation that kills it. The two sides of that match separated at roughly 24 tiles
+  // (winners) against 43 (losers) of median support distance, so this sits just above the winning
+  // side's spacing - close enough to hold a group, loose enough not to fire constantly while
+  // fighting normally.
+  constexpr float kTeamCohesionRange = 30.0f;
+
+  // How far a retreat is allowed to bend toward the team instead of running dead away from the
+  // chaser. Bots were ending a sustained retreat a median 3-7 tiles further from their nearest
+  // teammate than they started it, over 33-62 retreats a match, which is precisely how they arrive
+  // at the isolated 1-vs-2 that every death in these matches turns out to be. The human ends his
+  // retreats at +1.4 tiles and points them far less away from his own side (median 84 degrees off
+  // the bearing to it, against the bots' 101-140).
+  //
+  // 60 degrees still opens range - just on an arc back toward support rather than a straight line
+  // into an empty corner of the map.
+  constexpr float kFleeTeamBiasRadians = 1.05f;  // ~60 degrees
+
+  // Cruising speed as a fraction of the ship's top speed. Teams mostly hold station and trade shots
+  // until someone fails a dodge, and only then commits - so flat-out is the wrong default. A ship
+  // already at maximum has no acceleration left to dodge with and carries momentum it cannot
+  // cheaply reverse. Full speed is reserved for actually pressing a target ("rushing") and for
+  // running away (recharge_timer), both exempted below.
+  constexpr float kCruiseSpeedPercent = 0.8f;
+
+  constexpr float kLeashDistance = 30.0f;
+
+  // Once within this distance of the target, stop closing further and circle instead - close
+  // enough that they'll eventually fail to dodge a lobbed shot and we can dive in, far enough to
+  // have room to maneuver instead of colliding.
+  //
+  // Measured bullet hit rate falls off a cliff right where the old fixed 15.0f sat: 33.3% at 10-14
+  // tiles against 16.3% at 15-19, which is why this was originally pulled in to 12.
+  //
+  // Raised 20% to 14.4 off live observation: bots were sitting too close during ordinary trading
+  // fire, and paying for it - in rec15 they took 2.19-3.81 damage/sec against the human's 1.79 while
+  // landing comparable bullet accuracy. Holding a little further out costs some hit rate and buys
+  // back more than that in damage avoided.
+  //
+  // Note this puts the outer end of the pump (kPumpAmplitude, +/-4) at 18.4 tiles, past the
+  // accuracy cliff, where 12 used to keep the whole cycle underneath it. That is a deliberate
+  // trade rather than an oversight; if hit rate drops more than damage taken improves, trim the
+  // amplitude rather than pulling this back.
+  constexpr float kOrbitDistance = 14.4f;
+
+  // An enemy inside this range is our problem regardless of what the rest of the team is doing -
+  // we can't ignore someone shooting us in the face to go help elsewhere. Outside it, defer to the
+  // team's focus target so four bots stop splitting into four separate duels.
+  //
+  // This was 15, which quietly disabled the whole team-focus override: we orbit at kOrbitDistance
+  // (12) with a +/-4 pump, so the engaged target is almost always inside 15 tiles and the
+  // self-defense exception fired essentially every tick. rec10 was the first match with team focus
+  // enabled and the bot team's focus rate went *down* (52% against rec9's 61%), which is what that
+  // looks like. The threshold has to be well inside normal fighting range to mean "on top of us"
+  // rather than "engaged at all".
+  // Raised 8 -> 10 alongside the engagement distance going to 14.4: this has to mean "closer than we
+  // ever intend to be" relative to the pump's inner edge (10.4), not a fixed number. Too high and it
+  // fires every tick and disables team focus entirely, which is what 15 did originally.
+  constexpr float kSelfDefenseDistance = 10.0f;
+
+  // Radius used for the local head-count that decides whether we're supported or outnumbered.
+  // Matches the radius the replay analysis bucketed on, so the exchange table it came from applies.
+  constexpr float kLocalAdvantageRadius = 25.0f;
+
+  // Standoff to hold when the nearby head-count is against us. The exchange ratio while outnumbered
+  // is bad at every range (0.57 at 5-9 tiles, 0.68 at 15-19), so this isn't a range that wins - it's
+  // the range that loses least while we disengage and wait for a teammate.
+  constexpr float kOutnumberedDistance = 28.0f;
+
+  // In-and-out oscillation applied on top of whichever base range is active, timed off the observed
+  // rhythm: closing runs of a median 1.7s and back-off runs of 1.4s, each sweeping a median ~9-10
+  // tiles (p25 ~4). Amplitude is held to 4 rather than the full half-sweep so that the outer
+  // extreme of the supported cycle lands at 16 tiles instead of pushing past the accuracy cliff at
+  // 15 - the whole point of orbiting at 12 is to keep the cycle on the good side of it.
+  constexpr float kPumpAmplitude = 4.0f;
+  constexpr u32 kPumpHalfPeriodTicks = 150;  // ~1.5s per leg
+
+  // Bomb hitbox tolerance multiplier while orbiting - bigger than the bullet/thor multiplier below
+  // so bombs land as area denial off a near miss instead of needing a precise direct hit, like
+  // lobbing them into blast range instead of sniping with them.
+  //
+  // This is now only the coarse geometry filter. It is deliberately range-blind - an 8x box is as
+  // easy to clip at 30 tiles as at 10 - which is why bomb hit rate sat flat and low (8-21%) instead
+  // of falling off with range the way it physically must. BombImpactLikelihoodNode does the real
+  // work now; this just cheaply rejects shots pointed nowhere near the target.
+  constexpr float kBombProximityMultiplier = 8.0f;
+
+  // How much of the proximity-fuse radius the target is allowed to be able to escape during the
+  // bomb's flight. 1.0 means "they can just barely slip it"; below 1.0 demands margin.
+  //
+  // Raised from 1.0 after rec23, where the gate at 1.0 was far tighter than estimated: bots fired a
+  // combined EIGHT bombs in the whole match against the human's 42, and the ones they did fire went
+  // out at 8.2-12.4 tiles, i.e. right at the gate's ceiling rather than anywhere they chose.
+  //
+  // The real arena settings put the model's cutoff near 12 tiles, not the 13-25 estimated. That
+  // collided with the *other* end of the range, which BombBlastSafetyNode bounds at
+  // blast_radius + kBombFriendlyBlastMargin so we don't eat our own blast. The two gates left a
+  // window a couple of tiles wide. Neither looked wrong alone.
+  //
+  // 3.0 widens the model's reach by sqrt(3) ~ 1.7x, to roughly 20-21 tiles on top of the empirical
+  // floor below. Deliberately expressed as a tolerance rather than a range cap so it still scales
+  // with the ship's actual bomb speed and the target's actual thrust.
+  constexpr float kBombImpactTolerance = 3.0f;
+
+  // Below this range the dodge model is not consulted at all. It estimates a worst-case optimal
+  // dodge - instant reaction, full MaximumThrust, best direction - and real targets measurably do
+  // not manage that: bombs land 13-21% of the time at ranges the model calls hopeless, and the
+  // human bombs at a median 23.8 tiles for 21.4%. Where measurement and a deliberately pessimistic
+  // model disagree inside the measured band, measurement wins.
+  //
+  // This is also the guarantee that the rec23 collapse cannot recur regardless of arena settings:
+  // bombing is available across a real window no matter what the model computes.
+  constexpr float kBombAlwaysAllowRange = 22.0f;
+
+  // Burst-fire pacing (a 0.3s firing window followed by a forced ~1s pause) used to live here and
+  // has been removed, because the corpus says it was modelling a habit that doesn't exist and
+  // costing us the one thing that actually separates strong players from weak ones.
+  //
+  // Players do not self-throttle: only 2.4% of inter-shot gaps fall under 0.2s, so the weapon's own
+  // cooldown is already the binding constraint and a synthetic pause on top of it is pure lost
+  // output. And ranking the 28 players with enough data by K/D, nearly every positioning metric is
+  // flat between the top and bottom thirds - median firing range 28.3 vs 28.7 tiles, hit rate 13.1%
+  // vs 12.9%, held range 31.2 vs 31.4, support distance 26.5 vs 26.0, damage taken 1.73 vs 1.76
+  // %max/sec. The metric that does separate them is volume of fire: 24.0 shots/min alive against
+  // 19.2, a 25% edge. A throttle that cuts our rate of fire is therefore imitating the losing half
+  // of the ladder.
+  //
+  // The between-volley BroadsideFaceNode branch went with it: it keyed off the burst timer, so with
+  // no bursts it would have fired on every orbiting tick instead of only during lulls. The data
+  // doesn't support broadside as a protective stance anyway - damage taken *rises* with heading
+  // offset, from 5.31 per sample nose-on to 8.10 at 90 degrees.
+
+  // How long to keep pressing an advantage after the target loses energy (hit or spent shooting)
+  // while we still have more than they do - a sustained window instead of a single-tick reaction,
+  // since TargetEnergyDropNode only reports the drop on the one tick it actually happened.
+  constexpr u32 kPressAdvantageTicks = 300;  // ~3s
+
+  constexpr float kAvoidTeamDistance = 6.0f;
+
+  // Minimum spacing we insist on from *any* enemy, not just the one we're shooting. Set inside the
+  // inner edge of the engagement pump (kOrbitDistance - kPumpAmplitude = 10.4) so it only pushes
+  // back when someone is closer than we ever intend to be, rather than fighting normal station
+  // keeping. TwosBoxBehavior has carried this for a while; Fours never picked it up.
+  constexpr float kAvoidEnemyDistance = 10.0f;
+
+  // How close a wall needs to be before we override movement to steer clear of it while fleeing.
+  // How far ahead, in seconds of travel, to look for terrain we're about to run into. A fixed
+  // 5-tile radius is a quarter of a second of warning at fighting speed - far too late to turn a
+  // ship carrying real momentum, which is how bots ended up wedged in pockets and then died on the
+  // way out. Detection now scales with actual speed; kWallCheckDistance stays as the contact-range
+  // backstop.
+  constexpr float kWallLookaheadSeconds = 0.9f;
+
+  constexpr float kWallCheckDistance = 5.0f;
+  // How far out to search for an opening once a wall is too close.
+  constexpr float kWallOpeningDistance = 35.0f;
+
+  // How far ahead (in seconds worth of their smoothed acceleration) to bend predicted aim toward
+  // where the target is actually trending, instead of assuming they hold their current velocity.
   constexpr float kAimLeadBiasSeconds = 0.2f;
 
-  // How much target acceleration is needed to reach full shot spread.
-  constexpr float kShotSpreadManeuveringNormalizer = 4.0f;
+  // Shot spread has been dropped from this tree entirely (the ShotSpreadNode header stays - other
+  // nexus behaviors still use it). It scaled deliberate aim error by how hard the target was
+  // maneuvering, on the theory that a dodging target needs to be hedged against rather than aimed
+  // at precisely. The replay corpus doesn't support the premise: bullet hit rate is flat at ~13%
+  // across every target lateral-speed bucket from 0-2 up to 18-20 tiles/sec, so accuracy is limited
+  // by range, not by how much the target is jinking. Deliberate spread was therefore pure accuracy
+  // loss layered on top of an aim solver that was already under-leading.
 
   // Enter a defensive (recharging) state once our energy drops below this fraction of the
   // target's estimated energy, and don't leave it again until we recover past the higher exit
@@ -85,49 +398,87 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   constexpr float kEnergyDisadvantageExitRatio = 0.9f;
   // Always treat energy this low as a disadvantage regardless of the target's energy, since being
   // critically low is dangerous even against an equally weak target.
-  constexpr float kCriticalEnergyPercent = 0.094f;
+  // Raised from 0.094. Bots were dying at 7.9-15.3% energy while the human died at 2.9%, so a floor
+  // at 9.4% was firing only once escape was no longer possible - by then a single bomb finishes you
+  // and the retreat has nowhere to go. Leaving at 25% is what buys enough margin to actually get
+  // out. This is the most likely constant here to need softening if bots turn out too skittish.
+  // Walked back from 0.25 after rec17. At 0.25 this fired far too readily and, combined with a
+  // retreat that used to suppress firing entirely, produced a 12-0 loss where the fleeing team got
+  // off 49-78 bullets all match. 0.18 still leaves meaningfully more escape margin than the
+  // original 0.094 - bots were dying at 7.9-15.3% before it was raised at all - without putting them
+  // in permanent retreat.
+  constexpr float kCriticalEnergyPercent = 0.18f;
 
-  //  If an enemy is near us and we're low energy thor if below this value
-  constexpr float kThorEnemyThreshold = 200.0f;
+  // EnergyDisadvantageNode only ever compares us to the *current target's* energy, so it has no
+  // notion of being outnumbered: in a 3v1 where the nearest enemy happens to be the hurt one, it
+  // reports no disadvantage at all and the bot keeps fighting. That is the gap these two rules
+  // close, and it is the one the replays point straight at - in rec15 Lalita spent 98.7% of her
+  // hurt-and-close time outnumbered, retreated in only 45% of it, and died at 14.5% energy against
+  // a -2 head-count. Bots overall spent about twice as long as the human in that state (27.7s and
+  // 35.6s against his 15.5s) while retreating far less of it (38-68% against his 77.8%).
+  //
+  // At -2 or worse the exchange is a loss at every range (ratio 0.57-0.68 in the corpus table), so
+  // that case leaves unconditionally. At -1 it's only worth breaking off if we're also not healthy.
+  constexpr float kBadlyOutnumberedAdvantage = -1.0f;  // InvertChild fires below this, i.e. -2 or worse
+  constexpr float kOutnumberedRetreatEnergy = 0.6f;
 
-  // How far away from a teammate before we regroup
-  constexpr float kTeamRange = 40.0f;
+  // A hard floor on engaging at all. Below this we are one clean hit from dead and every exchange is
+  // a losing one, so the only fight worth being in is one we can end this second.
+  //
+  // This sits below kCriticalEnergyPercent (0.18) rather than replacing it. That one is the general
+  // "we're losing, disengage" trigger and is relative to the enemy; this is an absolute rule that
+  // holds no matter how the comparison comes out, and - more to the point - it is what the finish
+  // exemption below is measured against. Keeping them separate means the exemption can never widen
+  // just because the retreat threshold gets retuned.
+  constexpr float kEngageFloorEnergyPercent = 0.15f;
 
-  constexpr float kLeashDistance = 30.0f;
+  // The exemption. Both conditions have to hold: they are well below us *and* nearly dead outright.
+  // Relative alone is worthless down here - 14% against 13% is a coin flip, not a kill - and
+  // absolute alone would have us trading with someone equally low for no reason.
+  constexpr float kFinishRelativeEnergyPercent = 0.5f;
+  constexpr float kFinishAbsoluteEnergyPercent = 0.15f;
+  // And close enough that "finish them" is a real claim rather than an intention. Inside the
+  // engagement pump's inner edge (10.4), so this is knife range, not a decision to go chase.
+  constexpr float kFinishDistance = 10.0f;
 
-  // Once within this distance of the target, stop closing further and circle instead - close
-  // enough that they'll eventually fail to dodge a lobbed shot and we can dive in, far enough to
-  // have room to maneuver instead of colliding.
-  constexpr float kOrbitDistance = 15.0f;
-
-  // Bomb hitbox tolerance multiplier while orbiting - bigger than the bullet/thor multiplier below
-  // so bombs land as area denial off a near miss instead of needing a precise direct hit, like
-  // lobbing them into blast range instead of sniping with them.
-  constexpr float kBombProximityMultiplier = 8.0f;
-
-  // Fire bullets in short windows instead of spraying continuously while orbiting - a burst this
-  // long, then a forced pause this long before the next one. Bypassed entirely once rushing.
-  constexpr u32 kBurstFireDurationTicks = 30;   // ~0.3s of allowed fire
-  constexpr u32 kBurstFireCooldownTicks = 100;  // ~1s forced pause after
-
-  // How long to keep pressing an advantage after the target loses energy (hit or spent shooting)
-  // while we still have more than they do - a sustained window instead of a single-tick reaction,
-  // since target_energy_prev only differs from target_energy for the one tick the drop happened.
-  constexpr u32 kPressAdvantageTicks = 300;  // ~3s
-
-  constexpr float kAvoidTeamDistance = 6.0f;
-
-  // How close a wall needs to be before we override movement to steer clear of it while fleeing.
-  constexpr float kWallCheckDistance = 5.0f;
-  // How far out to search for an opening once a wall is too close.
-  constexpr float kWallOpeningDistance = 35.0f;
-
+  //.Child<ReadConfigIntNode<u16>>("queue_command1", "command1")
+  //.Child<ReadConfigIntNode<u16>>("queue_command2", "command2")
+  //.Child<ReadConfigIntNode<u16>>("queue_command3", "command3")
+  //.Child<ChatMessageNode>(ChatMessageNode::PublicBlackboard("command1")) // Invert so this fails and freq is
+  // reevaluated. .Child<ChatMessageNode>(ChatMessageNode::PublicBlackboard("command2")) // Invert so this fails and
+  // freq is reevaluated. .Child<ChatMessageNode>(ChatMessageNode::PublicBlackboard("command3")) // Invert so this fails
+  // and freq is reevaluated.
+  // clang-format off
   builder
     .Selector()
-        .InvertChild<PlayerSelfNode>("self")
-        .Sequence() // Enter the specified ship if not already in it.
+        // No queue sequence here, unlike the twos/threes/fours behaviors. This one runs in an open
+        // public arena rather than a queued X-vs-X match, so there is no "?next <n>v<n>pub" to join
+        // and nothing to re-queue into. Everything below is otherwise identical to FoursBehavior.
+        //
+        // The match_startup timer that the rest of the tree gates on is only ever set on leaving
+        // spectator mode, and TimerExpiredNode treats an unset key as already expired - so in a pub
+        // where the bot never sits in spec, those gates simply pass and the bot fights immediately.
+        .Sequence() // Don't do anything while in spec
+            .Child<PlayerFrequencyQueryNode>("self_freq")
+            .Child<EqualityNode<u16>>("self_freq", 8025)  //Check spec
+            .Child<ScalarNode>(1.0f, "spectating")
+            .End()
+        .Sequence() // Match startup begins when we get taken out of spec (since we sit in spec when waiting)
+            .Child<BlackboardSetQueryNode>("spectating")  //We just came out of spectating
+            .Child<TimerSetNode>("match_startup", 3000)  //Safety net only - Nexus.cpp expires this immediately once it sees the "GO!" match start message over private chat.
+            .Child<BlackboardEraseNode>("spectating")
+            .End()
+        .Sequence() // Enter the specified ship if not already in it and have been taken out of spec.
+            .InvertChild<TimerExpiredNode>("match_startup")            
             .InvertChild<ShipQueryNode>("request_ship")
             .Child<ShipRequestNode>("request_ship")
+            .End()
+        .Sequence()  // Fire 1 shot startup shot and set targets position to monitor for when they move so we can get out of the ready check loop
+            .InvertChild<TimerExpiredNode>("match_startup")      
+            .Child<TimerExpiredNode>("pre_fire")  // just needs to be longer than match_start
+            .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
+            .Child<InputActionNode>(InputAction::Bullet)
+            .Child<TimerSetNode>("pre_fire", 1500)
             .End()
         .Sequence() //Attach if someone is safe and we have full energy
             .Child<BlackboardSetQueryNode>("tchat_safe")
@@ -148,18 +499,21 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
             .Child<AttachedQueryNode>("self")
             .Child<DetachNode>()
             .End()
- .Selector() // Choose to fight the player or follow waypoints.
+           .Selector() // Choose to fight the player or follow waypoints.
             .Sequence() // Find nearest target and either path to them or seek them directly.              
                 .Sequence(CompositeDecorator::Success)
                     .Child<PlayerPositionQueryNode>("self_position")
-                    .Sequence() 
+                    .Sequence() //Base pick: the genuinely nearest enemy, kept under its own keys as well. "target" gets overridden by the team focus and low-energy rules below, and every defensive check needs the one actually on top of us rather than the one we've chosen to shoot.
                         .Child<NearestMemoryTargetNode>("target")
-                        .Child<PlayerPositionQueryNode>("target", "target_position")
-                        .Child<PlayerEnergyQueryNode>("target", "target_energy")
-                        .Child<TargetAccelerationNode>("target", "target_acceleration")
-                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds)
-                        .Child<PlayerPositionQueryNode>("target", "nearest_target_position") //Addionally copy to nearest so we can use it later
-                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "nearest_aimshot", kAimLeadBiasSeconds)
+                        .Child<NearestMemoryTargetNode>("nearest_target")
+                        .Child<PlayerEnergyQueryNode>("nearest_target", "nearest_target_energy")
+                        .Child<PlayerPositionQueryNode>("nearest_target", "nearest_target_position")
+                        .Child<TargetAccelerationNode>("nearest_target", "nearest_target_acceleration")
+                        .Child<PredictiveAimNode>(WeaponType::Bullet, "nearest_target", "nearest_target_acceleration", "nearest_aimshot", kAimLeadBiasSeconds)
+                        .End()
+                     .Sequence(CompositeDecorator::Success) //Fight what the team is fighting, unless someone is already on top of us
+                        .Child<DistanceThresholdNode>("nearest_target_position", "self_position", kSelfDefenseDistance) //If an enemy is right on us, deal with them instead
+                        .Child<TeamFocusTargetNode>("target")
                         .End()
                      .Sequence(CompositeDecorator::Success) //If is someone low nearby override target
                         .Child<TimerExpiredNode>("recharge_timer") //Nearest target should be used when recharing
@@ -169,10 +523,14 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                         .InvertChild<DistanceThresholdNode>("lowest_target_position", "self_position", kLowEnergyDistanceThreshold)
                         .InvertChild<ScalarThresholdNode<float>>("lowest_target_energy", kLowEnergyThreshold)
                         .Child<LowestTargetNode>("target")
-                        .Child<PlayerPositionQueryNode>("target", "target_position")  //Override
-                        .Child<PlayerEnergyQueryNode>("target", "target_energy")  //Override
-                        .Child<TargetAccelerationNode>("target", "target_acceleration")  //Override
-                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds) //Override
+                        .End()
+                     .Sequence(CompositeDecorator::Success) //Derive everything else once, from whichever target actually survived the override chain above.
+                        .Child<PlayerPositionQueryNode>("target", "target_position")
+                        .Child<PlayerEnergyQueryNode>("target", "target_energy")
+                        .Child<TargetAccelerationNode>("target", "target_acceleration")
+                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds)
+                        .Child<PredictiveAimNode>(WeaponType::Bomb, "target", "target_acceleration", "bomb_aimshot", kAimLeadBiasSeconds) //Bombs fly slower than bullets, so they need their own (larger) lead
+                        .Child<TargetEnergyDropNode>("target", "target_energy", "target_energy_dropped") //Did *this* target just lose energy - identity-checked, so a target switch is no longer misread as a hit
                         .End()
                 .End()
                 .Sequence(CompositeDecorator::Success) // If we have a portal but no location, lay one down.
@@ -180,18 +538,21 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                     .InvertChild<ShipPortalPositionQueryNode>()
                     .Child<InputActionNode>(InputAction::Portal)
                     .End()
-                .Selector(CompositeDecorator::Success) // Enable multifire if ship supports it and it's disabled.
-                    .Sequence()
+                .Selector(CompositeDecorator::Success) // Multifire covers ground rather than a point, so run it only when a spread can catch more than one enemy.
+                    .Sequence() // Turn it on for a cluster we can afford to fan into.
                         .Child<ShipCapabilityQueryNode>(ShipCapability_Multifire)
-                        .Child<DistanceThresholdNode>("target_position", 35.0f) // If we are far from enemy, use multifire
+                        .Child<ScalarThresholdNode<float>>("enemies_near_target", kMultifireMinEnemies)
+                        .Child<PlayerEnergyPercentThresholdNode>(kMultifireMinEnergyPercent)
                         .InvertChild<ShipMultifireQueryNode>()  //Check if multifire is off
-                        .InvertChild<BlackboardSetQueryNode>("rushing") //dont multi if rushing
                         .Child<InputActionNode>(InputAction::Multifire) //Turn on multifire
                         .End()
-                    .Sequence()
+                    .Sequence() // Turn it back off for a lone target, or once we can't afford the per-shot premium.
                         .Child<ShipCapabilityQueryNode>(ShipCapability_Multifire)
-                        .InvertChild<DistanceThresholdNode>("target_position", 35.0f) // If we are far from enemy, turn off multifire
                         .Child<ShipMultifireQueryNode>()  //Check if multifire is on
+                        .Selector()
+                            .InvertChild<ScalarThresholdNode<float>>("enemies_near_target", kMultifireMinEnemies)
+                            .InvertChild<PlayerEnergyPercentThresholdNode>(kMultifireMinEnergyPercent)
+                            .End()
                         .Child<InputActionNode>(InputAction::Multifire)  //Turn off multifire
                         .End()
                     .End()
@@ -210,14 +571,70 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                         .Child<InputActionNode>(InputAction::Antiwarp)
                         .End()
                     .End()
+                .Sequence(CompositeDecorator::Success) // Work out how close we should be fighting right now: the exchange favors closing hard at parity or better, and backing off while outnumbered.
+                    .Child<LocalAdvantageNode>(kLocalAdvantageRadius, "local_advantage")
+                    .Child<EngagementRangeNode>("local_advantage", "engagement_range", kOrbitDistance, kOutnumberedDistance, kPumpAmplitude, kPumpHalfPeriodTicks)
+                    .Child<EnemiesNearTargetNode>("target", kMultifireClusterRadius, "enemies_near_target") //Drives the multifire toggle below
+                    .Child<EnemiesNearTargetNode>("target", kRocketIsolationRadius, "enemies_near_target_wide") //Wider count, for "is this target actually on its own" - drives the rocket gate
+                    .Selector(CompositeDecorator::Success) // Keep the team's centre of mass fresh for the flee bias below - or clear it outright if we're the last one alive, so we don't retreat toward a dead teammate's last position.
+                        .Child<TeamCentroidNode>("team_centroid")
+                        .Child<BlackboardEraseNode>("team_centroid")
+                        .End()
+                    .Selector(CompositeDecorator::Success) // Hold something back unless we're committing to a kill or running for our life.
+                        .Child<BlackboardSetQueryNode>("rushing")            //Pressing a target - commit everything
+                        .InvertChild<TimerExpiredNode>("recharge_timer")     //Escaping - we want every bit of speed
+                        .Child<CruiseSpeedNode>(kCruiseSpeedPercent)
+                        .End()
+                    .End()
                 .Sequence(CompositeDecorator::Success) // Continuously reassess fight-vs-flee using energy relative to the target, instead of a fixed timer.
-                    .Child<EnergyDisadvantageNode>("target", "target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent)
+                    .Child<EnergyDisadvantageNode>("nearest_target", "nearest_target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent) //Judge fight-vs-flee against the enemy actually on top of us. Comparing against the team focus target meant a bot could be losing badly to someone at 3 tiles while reporting no disadvantage because the far target it had chosen to shoot was weaker.
                     .Child<TimerSetNode>("recharge_timer", 200)
+                    .End()
+                .Sequence(CompositeDecorator::Success) // Badly outnumbered - leave regardless of how the nearest duel happens to be going.
+                    .InvertChild<ScalarThresholdNode<float>>("local_advantage", kBadlyOutnumberedAdvantage)
+                    .Child<TimerSetNode>("recharge_timer", 200)
+                    .End()
+                .Sequence(CompositeDecorator::Success) // Down bodies and not healthy - stop trading and get out.
+                    .InvertChild<ScalarThresholdNode<float>>("local_advantage", 0.0f)
+                    .InvertChild<PlayerEnergyPercentThresholdNode>(kOutnumberedRetreatEnergy)
+                    .Child<TimerSetNode>("recharge_timer", 200)
+                    .End()
+                .Sequence(CompositeDecorator::Success) // Hard floor: below this we don't engage anyone, full stop. EnergyDisadvantageNode's critical percent currently fires above this anyway, but that one is a tunable retreat threshold and this is a rule - stated separately so retuning the former can't quietly repeal the latter.
+                    .InvertChild<PlayerEnergyPercentThresholdNode>(kEngageFloorEnergyPercent)
+                    .Child<TimerSetNode>("recharge_timer", 200)
+                    .End()
+                .Selector(CompositeDecorator::Success) // Below the engage floor the only fight worth staying in is one we can end. Everything else above has already set recharge_timer by now; this is the single exception that takes it back off.
+                    .Sequence()
+                        .InvertChild<PlayerEnergyPercentThresholdNode>(kEngageFloorEnergyPercent) // we're under the floor
+                        .Child<FinishableTargetNode>("target", "target_energy", kFinishRelativeEnergyPercent, kFinishAbsoluteEnergyPercent) // ...but they're clearly lower and nearly dead
+                        .InvertChild<DistanceThresholdNode>("target_position", "self_position", kFinishDistance) // close enough to actually land it
+                        .Child<VisibilityQueryNode>("target_position") // no pathing across the map at this energy
+                        .Child<ScalarThresholdNode<float>>("local_advantage", 0.0f) // and not while their friends are the ones nearby
+                        .Selector() // A dive without a repel in reserve has no way out if it goes wrong. Last one alive there's nobody left to wait for, so take the chance.
+                            .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold)
+                            .InvertChild<BlackboardSetQueryNode>("team_centroid")
+                            .End()
+                        .Child<ScalarNode>(1.0f, "finishing")
+                        .Child<BlackboardEraseNode>("recharge_timer")
+                        .End()
+                    .Child<BlackboardEraseNode>("finishing")
+                    .End()
+                .Sequence(CompositeDecorator::Success) // A rocket lit to escape has to be seen through to the end of its burn.
+                    .Child<BlackboardSetQueryNode>("rocket_defensive")
+                    .Selector()
+                        .Sequence() // Still burning - stay committed to the retreat, whatever else the tree decided this tick.
+                            .Child<RocketActiveQueryNode>()
+                            .Child<TimerSetNode>("recharge_timer", 200)
+                            .Child<BlackboardEraseNode>("finishing") //Nothing is worth turning back into at the speed a rocket carries
+                            .Child<BlackboardEraseNode>("rushing")
+                            .End()
+                        .Child<BlackboardEraseNode>("rocket_defensive") //Burn finished, free to fight again
+                        .End()
                     .End()
                 .Selector()
                     .Sequence() // Attempt to dodge and use defensive items.
                         .Sequence(CompositeDecorator::Success) // Always check incoming damage so we can use it in repel and portal sequences.
-                            .Child<IncomingDamageQueryNode>(kRepelDistance, "incoming_damage")
+                            .Child<IncomingBlastDamageNode>(kRepelDistance, "incoming_damage")  //Blast-falloff aware, so a bomb clipping our edge isn't scored as a lethal direct hit and doesn't burn a repel
                             .Child<PlayerCurrentEnergyQueryNode>("self_energy")
                             .End()
                         .Sequence(CompositeDecorator::Success) // If we are in danger but can't repel, use our portal.
@@ -241,61 +658,117 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                             .End()
                         .Child<DodgeIncomingDamage>(0.2f, 30.0f)
                         .End()
+                    .Sequence() // Keep distance from the target during ready-check instead of sitting still until the match officially starts.
+                        .InvertChild<TimerExpiredNode>("match_startup")
+                        .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "team_centroid") //Additive now - returns Failure so the flee below still runs and both forces sum
+                            .Child<FleeNode>("nearest_target_position", kLeashDistance, 5.0f, 0.2f, "nearest_target_energy")
+                            .End()
+                        .End()
                     .Sequence()  //Keep enemy distance while reacharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
+                        .Child<BlackboardEraseNode>("rushing") //We're breaking off, so we are no longer pressing. Without this "rushing" is only ever cleared inside the aim-and-shoot Parallel below, which this branch skips entirely - so it stayed set for the whole retreat, keeping the commitment posture alive, bypassing the cruise-speed cap and the firing energy gate long after we stopped shooting.
+                        .Sequence(CompositeDecorator::Success) // Drop a mine into our wake, only for a chaser actually running us down from behind.
+                            .Child<PlayerEnergyPercentThresholdNode>(kMineMinEnergyPercent)
+                            .Child<AtMaxSpeedNode>(kRocketMinSpeedPercent)
+                            .Child<PursuedFromBehindNode>("nearest_target", kMineRearConeDegrees, kMinePursuitClosingSpeed) //Must be the enemy actually chasing us, not the team's focus target somewhere else - checking "target" here is how mines started getting laid offensively again
+                            .Child<DistanceThresholdNode>("nearest_target_position", "self_position", kMineMinPursuerDistance)
+                            .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", kMineMaxPursuerDistance)
+                            .Child<TimerExpiredNode>("mine_timer")
+                            .Child<MineAvailableNode>()
+                            .Child<InputActionNode>(InputAction::Mine)
+                            .Child<TimerSetNode>("mine_timer", 500)
+                            .End()
+                        .Sequence(CompositeDecorator::Success) // Rocket clear when someone is closing on us and we're already at running speed.
+                            .Child<ShipItemCountThresholdNode>(ShipItemType::Rocket)
+                            .InvertChild<RocketActiveQueryNode>()
+                            .Child<AtMaxSpeedNode>(kRocketMinSpeedPercent)
+                            .InvertChild<DistanceThresholdNode>("target_position", "self_position", kRocketEscapeDistance)
+                            .Child<TimerExpiredNode>("rocket_timer")
+                            .Child<InputActionNode>(InputAction::Rocket)
+                            .Child<TimerSetNode>("rocket_timer", 1500)
+                            .Child<ScalarNode>(1.0f, "rocket_defensive")  //Mark this burn as an escape, so the retreat is held for its whole duration - see the hold block above the fight/flee Selector
+                            .End()
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
-                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance)
-                            .Child<FleeNode>("nearest_aimshot", kLeashDistance, 5.0f, 0.2f, "target_energy")
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "team_centroid") //Additive now - returns Failure so the flee below still runs and both forces sum
+                            .Child<FleeNode>("nearest_aimshot", kLeashDistance, 5.0f, 0.2f, "nearest_target_energy", "team_centroid", kFleeTeamBiasRadians) //The low-energy panic override has to be judged against whoever is chasing us. Pointing it at "target_energy" meant a bot fleeing a healthy enemy at 3 tiles could suppress its own panic because the distant focus target it happened to be shooting was weaker.
+                            .End()
+                        .Sequence(CompositeDecorator::Success) // Keep shooting at whoever is chasing us. Backing off must not mean going silent - this branch takes the whole Selector, so the aim-and-shoot block below never runs while it is active, and without this a retreating bot fired nothing at all. In rec17 that produced a death spiral: outnumbered -> permanent retreat -> no return fire -> still outnumbered. The losing team fired 49-78 bullets all match against the winners' 136-239 and lost 12-0. FleeNode already faces the threat while retreating, so the heading is right and this only needs permission to pull the trigger.
+                            .Child<TimerExpiredNode>("match_startup")
+                            .InvertChild<DistanceThresholdNode>("nearest_target_position", kMaxBulletRange)
+                            .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
+                            .InvertChild<InputQueryNode>(InputAction::Bomb)
+                            .InvertChild<TileQueryNode>(kTileIdSafe)
+                            .Child<ShotVelocityQueryNode>(WeaponType::Bullet, "bullet_fire_velocity")
+                            .Child<RayNode>("self_position", "bullet_fire_velocity", "bullet_fire_ray")
+                            .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "nearest_target_bounds", 4.0f)
+                            .Child<MoveRectangleNode>("nearest_target_bounds", "nearest_aimshot", "nearest_target_bounds")
+                            .Child<RayRectangleInterceptNode>("bullet_fire_ray", "nearest_target_bounds")
+                            .Child<ShotLineOfSightNode>("nearest_aimshot", kBulletBounceRange)  //Same terrain gate as the main fire check - retreating is when we're most likely to have terrain between us and whoever is chasing
+                            .Child<InputActionNode>(InputAction::Bullet)
                             .End()
                         .End()
                     .Sequence() // Path to target if they aren't immediately visible.
                         .InvertChild<VisibilityQueryNode>("target_position")
+                        .Child<ScalarThresholdNode<float>>("local_advantage", 0.0f) //Never cross the map into a fight we're already losing. This branch pathfinds straight at the target and sits ahead of the orbit/regroup movement in this Selector, so without a head-count check it happily routed the bot through the middle of the enemy team to reach a focus target picked for being near the team centroid - which is exactly the 3-on-1 dive. Failing here falls through to the regroup below instead.
                         .Child<GoToNode>("target_position")
                         .Child<AvoidTeamNode>(kAvoidTeamDistance)
+                        .Child<AvoidEnemyNode>(kAvoidEnemyDistance) //Path around anyone we pass rather than straight over them
                         .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
                         .End()
                     .Sequence() // Aim at target and shoot while seeking them.
-                        .Child<TimerExpiredNode>("match_startup") 
-                        .Sequence(CompositeDecorator::Success)
-                            .Child<DistanceThresholdNode>("target_position", kShotSpreadDistanceThreshold)
-                            .Child<ShotSpreadNode>("aimshot", 3.0f, 1.0f, "target_acceleration", kShotSpreadManeuveringNormalizer)
-                            .End()
+                        .Child<TimerExpiredNode>("match_startup")
                         .Parallel()
-                            .Selector() // Face the target to line up a shot, or broadside between volleys while orbiting to stay dodge-ready.
-                                .Sequence()
-                                    .InvertChild<BlackboardSetQueryNode>("rushing") // not pressing
-                                    .InvertChild<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance) // actually orbiting, not still closing
-                                    .Child<TimerExpiredNode>("burst_fire_until") // between volleys, not mid-burst
-                                    .Child<BroadsideFaceNode>("target_position")
-                                    .End()
-                                .Child<FaceNode>("aimshot")
+                            .Child<FaceNode>("aimshot")
+                            .Child<BlackboardEraseNode>("rushing") // Clear rushing status
+                            .Sequence(CompositeDecorator::Success) // Juke away from moderate incoming threats without breaking aim off the target.
+                                .Child<DodgeJukeNode>(30.0f)
                                 .End()
-                            .Child<BlackboardEraseNode>("rushing")
                             .Selector()
+                               .Sequence() // Committed to ending a fight we're otherwise too weak to be in. Gated hard by the finish exemption above, so reaching here already means they're nearly dead, close, visible, and we aren't outnumbered - all that's left is to actually go in.
+                                    .Child<BlackboardSetQueryNode>("finishing")
+                                    .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
+                                    .End()
                                .Sequence() // If there is any low target with in this range prioritize
-                                    .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold) //dont go into rush mode with no reps
+                                    .Selector() // Diving with no repel left has no way out if it goes wrong, so normally don't. Last one alive, there's no teammate left to fall back to and nothing to preserve the life for - take the fight.
+                                        .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold)
+                                        .InvertChild<BlackboardSetQueryNode>("team_centroid") //TeamCentroidNode fails and the centroid is erased above when no teammate is alive
+                                        .End()
                                     .Child<PlayerEnergyPercentThresholdNode>(kRushMinEnergyPercent) //only press if we have enough energy ourselves
+                                    .Child<ScalarThresholdNode<float>>("local_advantage", 0.0f) //diving while outnumbered loses the exchange ~2:1 no matter how weak the target looks
                                     .InvertChild<DistanceThresholdNode>("target_position", "self_position", kRushDistanceThreshold)
                                     .InvertChild<ScalarThresholdNode<float>>("target_energy", kLowEnergyRushThreshold)
                                     .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
-                                    .Child<ScalarNode>(1.0f, "rushing")
-                                    .Sequence(CompositeDecorator::Success) //Optionally rocket if the target is too far and we have decent energy
-                                        .Child<ShipItemCountThresholdNode>(ShipItemType::Rocket)
-                                        .Child<PlayerEnergyPercentThresholdNode>(0.6f)
-                                        .InvertChild<DistanceThresholdNode>("target_position", 30.0f)  //dont rocket if too far away
-                                        .Child<DistanceThresholdNode>("target_position", 10.0f)  //dont rocket if right on them you'll overshoot
-                                        .Child<TimerExpiredNode>("rocket_timer")
-                                        .Child<InputActionNode>(InputAction::Rocket)
-                                        .Child<TimerSetNode>("rocket_timer", 1500)
+                                    .Child<ScalarNode>(1.0f, "rushing") // set rushing status 
+                                    .Sequence(CompositeDecorator::Success) //Rocket down a fleeing kill, but only once we're already moving - lit from slow it mostly buys back speed we'd have reached anyway, and it overshoots.
+                                        .Child<ShipItemCountThresholdNode>(ShipItemType::Rocket) // check we have rocket items
+                                        .Child<PlayerEnergyPercentThresholdNode>(kRocketMinSelfEnergyPercent) // only commit a limited item while we can still afford the dive
+                                        .Child<TargetEnergyPercentThresholdNode>("target", "target_energy", kRocketTargetEnergyPercent) // percent of the target's own max, not an absolute - a rocket is for finishing something already nearly dead
+                                        .InvertChild<ScalarThresholdNode<float>>("enemies_near_target_wide", kRocketMaxEnemiesNearTarget) // and only if it's on its own - diving a target with friends around just delivers us into them
+                                        .Child<TimerExpiredNode>("recharge_timer") // never light one while we're supposed to be breaking off
+                                        .Child<TargetOpeningRangeNode>("target", kRocketMinOpeningSpeed) // only chase something that is actually running. A target holding station in its own team reads identically to a fleeing one under a distance check, and rocketing at it is the dive-into-a-crowd behavior - we arrive fast, outnumbered, with no thrust left to turn around.
+                                        .Child<ScalarThresholdNode<float>>("local_advantage", kRocketMinAdvantage) // stricter than the rush around it: spend a limited item only when we're up bodies and the kill actually converts
+                                        .InvertChild<RocketActiveQueryNode>() // don't stack one on top of a burn already running
+                                        .Child<AtMaxSpeedNode>(kRocketMinSpeedPercent)
+                                        .InvertChild<DistanceThresholdNode>("target_position", kRocketChaseMaxDistance)  //dont rocket if too far away
+                                        .Child<DistanceThresholdNode>("target_position", kRocketChaseMinDistance)  //dont rocket if right on them you'll overshoot
+                                        .Child<TimerExpiredNode>("rocket_timer") // check cooldown period
+                                        .Child<InputActionNode>(InputAction::Rocket) // use rockets
+                                        .Child<TimerSetNode>("rocket_timer", 3000) // cooldown doubled from 1500 - even when every condition above holds, a second rocket 15s into the same engagement is almost always the tail of one commitment rather than a fresh decision
                                         .End()
-                                    .Child<BlackboardEraseNode>("recharge_timer")
+                                    .Child<BlackboardEraseNode>("recharge_timer") // remove recharge status as we're going in for the kill
                                     .Child<BlackboardEraseNode>("orbit_direction") // pick a fresh orbit direction next time we're back to circling
                                     .End()
                                 .Sequence() // Press the advantage for a while after the target loses energy (hit or spent shooting) and now has meaningfully less than we do.
                                     .InvertChild<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance * 2.0f) //still needs to be a fight we're actually in, not clear across the map
+                                    .Child<ScalarThresholdNode<float>>("local_advantage", 0.0f) //same reason as the rush above - committing forward only pays while we're not outnumbered
+                                    .Selector() // Same repel reserve rule as the rush above - this branch also commits us forward.
+                                        .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold)
+                                        .InvertChild<BlackboardSetQueryNode>("team_centroid")
+                                        .End()
                                     .Child<PlayerCurrentEnergyQueryNode>("self_energy")
                                     .Sequence(CompositeDecorator::Success) // (Re)arm the window on a fresh drop - it doesn't need to still be dropping for the window to hold.
-                                        .Child<LessThanNode<float>>("target_energy", "target_energy_prev")
+                                        .Child<BlackboardSetQueryNode>("target_energy_dropped") //Set by TargetEnergyDropNode, which checks the drop belongs to *this* target. The old "target_energy < target_energy_prev" compared bare numbers with no identity, so switching to a weaker target read as a hit and armed a 3s commit-forward window against someone we'd never touched.
                                         .Child<GreaterThanNode<float>>("self_energy", "target_energy")
                                         .Child<TimerSetNode>("press_advantage_until", kPressAdvantageTicks)
                                         .End()
@@ -317,51 +790,54 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                                     .End()
                                 .Sequence(CompositeDecorator::Success)
                                     .InvertChild<BlackboardSetQueryNode>("rushing")
+                                    .Sequence(CompositeDecorator::Success) // Bake terrain into the attack movement too - additive, so it steers us around walls while still closing/orbiting rather than replacing the attack. Wrapped so its Failure doesn't abort this sequence.
+                                        .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "target_position")
+                                        .End()
                                     .Selector()
-                                        .Sequence() // Path to teammate if far away - still faces/fires/juke-dodges via this Parallel instead of running blind.
-                                            .Child<NearestTeammateNode>("nearest_teammate", 2) //Make sure we have at least 1 teammate close, if more than one stay with the broader group
-                                            .Child<PlayerPositionQueryNode>("nearest_teammate", "nearest_teammate_position")
-                                            .Child<DistanceThresholdNode>("nearest_teammate_position", kTeamRange) //If we're already near teammates dont run to them
-                                            .Child<ScalarThresholdNode<float>>("target_energy", kLowEnergyThreshold)  //If we're going for a kill or someone is diving dont run
-                                            .Child<GoToNode>("nearest_teammate_position")
+                                        .Sequence() // Rejoin the team when we've drifted off it - still faces/fires/juke-dodges via this Parallel instead of running blind.
+                                            .Child<TeamCentroidNode>("team_centroid") //Anchor on where the team actually is, not on one teammate who is themselves running somewhere else
+                                            .Child<DistanceThresholdNode>("team_centroid", kTeamCohesionRange)
+                                            .InvertChild<ScalarThresholdNode<float>>("local_advantage", 1.0f) //Only stay out on our own while we're actually up bodies locally
+                                            .Child<GoToNode>("team_centroid")
                                             .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
                                             .End()
                                         .Selector() // Close the gap while still far out, then circle instead of closing all the way to melee range.
                                             .Sequence()
-                                                .Child<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance)
+                                                .Child<DistanceThresholdNode>("target_position", "self_position", "engagement_range")
                                                 .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Zero)
                                                 .End()
-                                            .Child<OrbitNode>("aimshot", kOrbitDistance, "orbit_direction")
+                                            .Child<OrbitNode>("aimshot", "engagement_range", "orbit_direction")
                                             .End()
                                         .End()
                                     .Child<AvoidTeamNode>(kAvoidTeamDistance)
+                                    .Child<AvoidEnemyNode>(kAvoidEnemyDistance) //Don't let anyone sit on top of us regardless of who we've picked to shoot. Orbit distance is held to the *target*, so before this a second enemy could close to point blank and be ignored entirely while we kept station on someone else. Guarded by the "rushing" invert above, so it never fights a committed dive.
                                     .End()
                                 .End()
                             .Sequence(CompositeDecorator::Success) // Bomb fire check.
-                                .Child<TimerExpiredNode>("match_startup") 
-                                .Child<TimerExpiredNode>("recharge_timer") 
-                                .Child<VectorSubtractNode>("aimshot", "self_position", "target_direction", true)
-                                .Child<PlayerVelocityQueryNode>("self_velocity")
-                                .Child<VectorDotNode>("self_velocity", "target_direction", "forward_velocity")
-                                .Child<ScalarThresholdNode<float>>("forward_velocity", 2.0f)
-                                .Child<PlayerEnergyPercentThresholdNode>(0.45f)
-                                .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb)
-                                .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
-                                .InvertChild<InputQueryNode>(InputAction::Thor)
-                                .Child<IncomingDamageQueryNode>("target", kRepelDistance * 2.5f, 2.75f, "outgoing_damage")
+                                .Child<TimerExpiredNode>("match_startup") // Ensure match countdown timer has expired
+                                .Child<TimerExpiredNode>("recharge_timer")  // Ensure we're not still in a fleeing state
+                                .Child<VectorSubtractNode>("bomb_aimshot", "self_position", "target_direction", true) //check target aim
+                                .Child<PlayerVelocityQueryNode>("self_velocity") // get our current velocity
+                                .Child<VectorDotNode>("self_velocity", "target_direction", "forward_velocity")  // compare our velocity to target
+                                .Child<ScalarThresholdNode<float>>("forward_velocity", kBombMinForwardVelocity) // don't lob one while actively backing away from the target
+                                .Child<PlayerEnergyPercentThresholdNode>(0.45f) // ensure we have enough energy to fire
+                                .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb) // ensure bombs are ready to fire
+                                .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb) // ensure bombs are off cooldown
+                                .InvertChild<InputQueryNode>(InputAction::Thor) 
+                                .Child<IncomingDamageQueryNode>("target", kRepelDistance * 2.5f, 2.75f, "outgoing_damage") // check outgoing damage to target
                                 .Child<ScalarThresholdNode<float>>("outgoing_damage", kBombRequiredDamageOverlap) // Check if we have enough bullets overlapping outgoing damage to fire a bomb into.
                                 .InvertChild<DistanceThresholdNode>("nearest_target_position", 50.0f)  //dont bomb from too far
-                                .Child<DistanceThresholdNode>("nearest_target_position", 12.0f)  //dont pb yourself (dont use target here in case a teammate is on top)
-                                .Child<NearestTeammatePlayerPositionQueryNode>("target", "target_nearest_teammate_position")
-                                .Child<DistanceThresholdNode>("target_position", "target_nearest_teammate_position", 12.0f)  //dont bomb at our target if we or a teammate is near them
-                                .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity")
-                                .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray")
+                                .Child<BombBlastSafetyNode>("bomb_aimshot", kBombFriendlyBlastMargin)  //never bomb when the blast would catch us or a teammate - fall through to bullets instead
+                                .Child<ShotLineOfSightNode>("bomb_aimshot")  //Hard gate: bombs don't pass through walls, and a bomb detonating on terrain we're stood near is the self-blast case we already try to avoid. No bounce allowance - BombBounceCount is commonly 0 and a bounced bomb does reduced damage anyway.
+                                .Child<BombImpactLikelihoodNode>("target", "bomb_aimshot", kBombImpactTolerance, kBombAlwaysAllowRange)  //Will this bomb actually arrive while they're still there? Compares how far the target can thrust clear during the bomb's flight against the proximity radius, with an empirical floor inside which the model isn't consulted. Self-tuning by range: evasion grows with flight time squared, so this tightens with distance on its own where the old 8x bounding box was equally easy to clip at 30 tiles as at 10.
+                                .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity") // check bomb velocity
+                                .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray") // check collision ray
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", kBombProximityMultiplier) // lob range, not a precise hit
-                                .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
+                                .Child<MoveRectangleNode>("target_bounds", "bomb_aimshot", "target_bounds")
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
                                 .Child<RenderRayNode>("world_camera", "bomb_fire_ray", 50.0f, Vector3f(1.0f, 1.0f, 0.0f))
                                 .Child<RayRectangleInterceptNode>("bomb_fire_ray", "target_bounds")
-                                .Child<InputActionNode>(InputAction::Bomb)
+                                .Child<InputActionNode>(InputAction::Bomb) // fire bomb
                                 .End()
                             .Sequence(CompositeDecorator::Success) // PB thor fire check.
                                 .Child<TimerExpiredNode>("match_startup")
@@ -381,13 +857,15 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                                 .Child<InputActionNode>(InputAction::Thor) //Thor
                                 .End()
                             .Sequence(CompositeDecorator::Success) // Determine if a shot should be fired by using weapon trajectory and bounding boxes.
-                                .Child<TimerExpiredNode>("match_startup")             
-                                .Child<TimerExpiredNode>("recharge_timer") 
+                                .Child<TimerExpiredNode>("match_startup") // Ensure match countdown timer has expired            
+                                .Child<TimerExpiredNode>("recharge_timer") // Ensure we're not still in a fleeing state
+                                .InvertChild<DistanceThresholdNode>("target_position", kMaxBulletRange) // Don't spray at ranges where bullets essentially never connect
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
-                                .Selector()
+                                .Selector() // Energy gate on ordinary fire, bypassed while committed - a bot that has decided to end a fight has to be allowed to shoot, and by definition it is under every energy threshold here.
                                     .Child<BlackboardSetQueryNode>("rushing")
+                                    .Child<BlackboardSetQueryNode>("finishing")
                                     .Child<PlayerEnergyPercentThresholdNode>(0.35f)
                                     .End()
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
@@ -398,18 +876,9 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RayRectangleInterceptNode>("bullet_fire_ray", "target_bounds")
-                                .Selector() // Fire in short bursts instead of spraying continuously, unless committed to finishing a kill.
-                                    .Child<BlackboardSetQueryNode>("rushing")
-                                    .InvertChild<TimerExpiredNode>("burst_fire_until") // still inside an active burst window
-                                    .Sequence() // Pause between bursts is over - open a new window and let this shot through.
-                                        .Child<TimerExpiredNode>("burst_ready_at")
-                                        .Child<TimerSetNode>("burst_fire_until", kBurstFireDurationTicks)
-                                        .Child<TimerSetNode>("burst_ready_at", kBurstFireDurationTicks + kBurstFireCooldownTicks)
-                                        .End()
-                                    .End()
+                                .Child<ShotLineOfSightNode>("aimshot", kBulletBounceRange)  //The intercept test above knows nothing about terrain, so a target behind a wall still produces a valid-looking shot. Bounce allowance kept for tight corners.
                                 .Child<InputActionNode>(InputAction::Bullet)
                                 .End()
-                            .Child<ScalarNode>("target_energy", "target_energy_prev") // snapshot for next tick's hit/spend detection above
                             .End()
                         .End()
                     .End()
