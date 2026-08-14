@@ -330,7 +330,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
 
   // How long to keep pressing an advantage after the target loses energy (hit or spent shooting)
   // while we still have more than they do - a sustained window instead of a single-tick reaction,
-  // since target_energy_prev only differs from target_energy for the one tick the drop happened.
+  // since TargetEnergyDropNode only reports the drop on the one tick it actually happened.
   constexpr u32 kPressAdvantageTicks = 300;  // ~3s
 
   constexpr float kAvoidTeamDistance = 6.0f;
@@ -395,6 +395,25 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // that case leaves unconditionally. At -1 it's only worth breaking off if we're also not healthy.
   constexpr float kBadlyOutnumberedAdvantage = -1.0f;  // InvertChild fires below this, i.e. -2 or worse
   constexpr float kOutnumberedRetreatEnergy = 0.6f;
+
+  // A hard floor on engaging at all. Below this we are one clean hit from dead and every exchange is
+  // a losing one, so the only fight worth being in is one we can end this second.
+  //
+  // This sits below kCriticalEnergyPercent (0.18) rather than replacing it. That one is the general
+  // "we're losing, disengage" trigger and is relative to the enemy; this is an absolute rule that
+  // holds no matter how the comparison comes out, and - more to the point - it is what the finish
+  // exemption below is measured against. Keeping them separate means the exemption can never widen
+  // just because the retreat threshold gets retuned.
+  constexpr float kEngageFloorEnergyPercent = 0.15f;
+
+  // The exemption. Both conditions have to hold: they are well below us *and* nearly dead outright.
+  // Relative alone is worthless down here - 14% against 13% is a coin flip, not a kill - and
+  // absolute alone would have us trading with someone equally low for no reason.
+  constexpr float kFinishRelativeEnergyPercent = 0.5f;
+  constexpr float kFinishAbsoluteEnergyPercent = 0.15f;
+  // And close enough that "finish them" is a real claim rather than an intention. Inside the
+  // engagement pump's inner edge (10.4), so this is knife range, not a decision to go chase.
+  constexpr float kFinishDistance = 10.0f;
 
   //.Child<ReadConfigIntNode<u16>>("queue_command1", "command1")
   //.Child<ReadConfigIntNode<u16>>("queue_command2", "command2")
@@ -555,6 +574,10 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                     .InvertChild<PlayerEnergyPercentThresholdNode>(kOutnumberedRetreatEnergy)
                     .Child<TimerSetNode>("recharge_timer", 200)
                     .End()
+                .Sequence(CompositeDecorator::Success) // Hard floor: below this we don't engage anyone, full stop. EnergyDisadvantageNode's critical percent currently fires above this anyway, but that one is a tunable retreat threshold and this is a rule - stated separately so retuning the former can't quietly repeal the latter.
+                    .InvertChild<PlayerEnergyPercentThresholdNode>(kEngageFloorEnergyPercent)
+                    .Child<TimerSetNode>("recharge_timer", 200)
+                    .End()
                 .Selector(CompositeDecorator::Success) // Below the engage floor the only fight worth staying in is one we can end. Everything else above has already set recharge_timer by now; this is the single exception that takes it back off.
                     .Sequence()
                         .InvertChild<PlayerEnergyPercentThresholdNode>(kEngageFloorEnergyPercent) // we're under the floor
@@ -602,7 +625,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .InvertChild<TimerExpiredNode>("match_startup")
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "team_centroid") //Additive now - returns Failure so the flee below still runs and both forces sum
-                            .Child<FleeNode>("nearest_target_position", kLeashDistance, 5.0f, 0.2f, "target_energy")
+                            .Child<FleeNode>("nearest_target_position", kLeashDistance, 5.0f, 0.2f, "nearest_target_energy")
                             .End()
                         .End()
                     .Sequence()  //Keep enemy distance while reacharging
@@ -630,7 +653,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                             .End()
                         .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kWallLookaheadSeconds, "team_centroid") //Additive now - returns Failure so the flee below still runs and both forces sum
-                            .Child<FleeNode>("nearest_aimshot", kLeashDistance, 5.0f, 0.2f, "target_energy", "team_centroid", kFleeTeamBiasRadians)
+                            .Child<FleeNode>("nearest_aimshot", kLeashDistance, 5.0f, 0.2f, "nearest_target_energy", "team_centroid", kFleeTeamBiasRadians) //The low-energy panic override has to be judged against whoever is chasing us. Pointing it at "target_energy" meant a bot fleeing a healthy enemy at 3 tiles could suppress its own panic because the distant focus target it happened to be shooting was weaker.
                             .End()
                         .Sequence(CompositeDecorator::Success) // Keep shooting at whoever is chasing us. Backing off must not mean going silent - this branch takes the whole Selector, so the aim-and-shoot block below never runs while it is active, and without this a retreating bot fired nothing at all. In rec17 that produced a death spiral: outnumbered -> permanent retreat -> no return fire -> still outnumbered. The losing team fired 49-78 bullets all match against the winners' 136-239 and lost 12-0. FleeNode already faces the threat while retreating, so the heading is right and this only needs permission to pull the trigger.
                             .Child<TimerExpiredNode>("match_startup")
@@ -663,8 +686,15 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Child<DodgeJukeNode>(30.0f)
                                 .End()
                             .Selector()
+                               .Sequence() // Committed to ending a fight we're otherwise too weak to be in. Gated hard by the finish exemption above, so reaching here already means they're nearly dead, close, visible, and we aren't outnumbered - all that's left is to actually go in.
+                                    .Child<BlackboardSetQueryNode>("finishing")
+                                    .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
+                                    .End()
                                .Sequence() // If there is any low target with in this range prioritize
-                                    .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold) //dont go into rush mode with no reps
+                                    .Selector() // Diving with no repel left has no way out if it goes wrong, so normally don't. Last one alive, there's no teammate left to fall back to and nothing to preserve the life for - take the fight.
+                                        .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold)
+                                        .InvertChild<BlackboardSetQueryNode>("team_centroid") //TeamCentroidNode fails and the centroid is erased above when no teammate is alive
+                                        .End()
                                     .Child<PlayerEnergyPercentThresholdNode>(kRushMinEnergyPercent) //only press if we have enough energy ourselves
                                     .Child<ScalarThresholdNode<float>>("local_advantage", 0.0f) //diving while outnumbered loses the exchange ~2:1 no matter how weak the target looks
                                     .InvertChild<DistanceThresholdNode>("target_position", "self_position", kRushDistanceThreshold)
@@ -691,9 +721,13 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Sequence() // Press the advantage for a while after the target loses energy (hit or spent shooting) and now has meaningfully less than we do.
                                     .InvertChild<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance * 2.0f) //still needs to be a fight we're actually in, not clear across the map
                                     .Child<ScalarThresholdNode<float>>("local_advantage", 0.0f) //same reason as the rush above - committing forward only pays while we're not outnumbered
+                                    .Selector() // Same repel reserve rule as the rush above - this branch also commits us forward.
+                                        .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold)
+                                        .InvertChild<BlackboardSetQueryNode>("team_centroid")
+                                        .End()
                                     .Child<PlayerCurrentEnergyQueryNode>("self_energy")
                                     .Sequence(CompositeDecorator::Success) // (Re)arm the window on a fresh drop - it doesn't need to still be dropping for the window to hold.
-                                        .Child<LessThanNode<float>>("target_energy", "target_energy_prev")
+                                        .Child<BlackboardSetQueryNode>("target_energy_dropped") //Set by TargetEnergyDropNode, which checks the drop belongs to *this* target. The old "target_energy < target_energy_prev" compared bare numbers with no identity, so switching to a weaker target read as a hit and armed a 3s commit-forward window against someone we'd never touched.
                                         .Child<GreaterThanNode<float>>("self_energy", "target_energy")
                                         .Child<TimerSetNode>("press_advantage_until", kPressAdvantageTicks)
                                         .End()
@@ -786,8 +820,9 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
                                 .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
-                                .Selector()
+                                .Selector() // Energy gate on ordinary fire, bypassed while committed - a bot that has decided to end a fight has to be allowed to shoot, and by definition it is under every energy threshold here.
                                     .Child<BlackboardSetQueryNode>("rushing")
+                                    .Child<BlackboardSetQueryNode>("finishing")
                                     .Child<PlayerEnergyPercentThresholdNode>(0.35f)
                                     .End()
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
@@ -800,7 +835,6 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                 .Child<RayRectangleInterceptNode>("bullet_fire_ray", "target_bounds")
                                 .Child<InputActionNode>(InputAction::Bullet)
                                 .End()
-                            .Child<ScalarNode>("target_energy", "target_energy_prev") // snapshot for next tick's hit/spend detection above
                             .End()
                         .End()
                     .End()
