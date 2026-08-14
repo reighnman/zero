@@ -32,15 +32,29 @@ namespace nexus {
 // ever fail in the direction of silently switching bullets to a hard gate - i.e. bots refusing to
 // fire in exactly the corner fights the allowance exists to preserve. Pass 0 for a hard gate.
 //
-// Bombs get the hard gate. They do not reliably bounce (BombBounceCount is per-ship and commonly 0),
-// a bounced bomb does reduced damage (BBombDamagePercent), and detonating one against a wall we are
+// Bombs get the hard gate on the part of the lane that terrain can actually stop them in - see the
+// proximity note below. They do not reliably bounce (BombBounceCount is per-ship and commonly 0), a
+// bounced bomb does reduced damage (BBombDamagePercent), and detonating one against a wall we are
 // stood near is exactly the self-blast case BombBlastSafetyNode exists to prevent.
 //
 // Thors must NOT use this node at all - a thor travels through walls, so terrain is irrelevant to
 // it and gating it here would remove the one weapon that can legitimately shoot through a wall.
+// PROXIMITY WEAPONS DO NOT FUSE ON TERRAIN. A wall only stops a bomb by direct contact of the
+// projectile itself - WeaponManager tests a single point, `map.IsSolid(weapon.x / 16000, weapon.y /
+// 16000, ...)`, while the proximity radius is used exclusively in the *player* collision scan. So a
+// bomb skimming past a wall carries on, where a bomb skimming past a ship detonates.
+//
+// That asymmetry matters at the far end of the lane. A bomb never has to traverse the last
+// `prox_radius` tiles, because the target trips the fuse first - so terrain within that final
+// stretch cannot stop the shot and must not veto it. Without this, a target standing against a wall
+// was un-bombable: the ray clipped the wall beside them and the gate refused a bomb that would have
+// detonated on the target before it ever got there. Pass `proximity_trigger` for bombs; bullets
+// have no fuse and keep the full-length cast.
 struct ShotLineOfSightNode : public behavior::BehaviorNode {
   ShotLineOfSightNode(const char* aim_key) : aim_key(aim_key), bounce_distance(0.0f) {}
   ShotLineOfSightNode(const char* aim_key, float bounce_distance) : aim_key(aim_key), bounce_distance(bounce_distance) {}
+  ShotLineOfSightNode(const char* aim_key, float bounce_distance, bool proximity_trigger)
+      : aim_key(aim_key), bounce_distance(bounce_distance), proximity_trigger(proximity_trigger) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -49,11 +63,31 @@ struct ShotLineOfSightNode : public behavior::BehaviorNode {
     auto opt_aim = ctx.blackboard.Value<Vector2f>(aim_key);
     if (!opt_aim) return behavior::ExecuteResult::Failure;
 
+    Game& game = *ctx.bot->game;
     Vector2f aim = *opt_aim;
+    Vector2f cast_to = aim;
+
+    if (proximity_trigger) {
+      u32 bombs = game.ship_controller.ship.bombs;
+      u32 level = bombs > 0 ? bombs - 1 : 0;
+
+      // Same derivation as BombBlastSafetyNode - keep these in step.
+      float prox_radius = ((game.connection.settings.ProximityDistance + level) * 18.0f - 14.0f) / 16.0f;
+
+      if (prox_radius > 0.0f) {
+        Vector2f along = aim - self->position;
+        float length = along.Length();
+
+        // The entire lane is inside fuse range, so there is no stretch terrain could stop it in.
+        if (length <= prox_radius) return behavior::ExecuteResult::Success;
+
+        cast_to = self->position + along * ((length - prox_radius) / length);
+      }
+    }
 
     // Cast to the aim point rather than to the target's current position: the aim point is where the
     // shot is actually going, and it's what the intercept test downstream is built against.
-    CastResult result = ctx.bot->game->GetMap().CastTo(self->position, aim, self->frequency);
+    CastResult result = game.GetMap().CastTo(self->position, cast_to, self->frequency);
 
     if (!result.hit) return behavior::ExecuteResult::Success;
 
@@ -68,6 +102,7 @@ struct ShotLineOfSightNode : public behavior::BehaviorNode {
 
   const char* aim_key = nullptr;
   float bounce_distance = 0.0f;
+  bool proximity_trigger = false;
 };
 
 }  // namespace nexus
