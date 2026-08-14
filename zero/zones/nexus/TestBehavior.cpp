@@ -115,6 +115,34 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // no longer a punishment: at 2s a single noise-driven abort silenced the dive for most of an
   // engagement.
   constexpr u32 kRushAbortCooldownTicks = 75;
+
+  // --- Outnumbered-enemy press ---
+  // The rush above only fires at a target that is already nearly dead, which leaves the most
+  // favourable situation in the game unexploited: an enemy on their own that we outnumber. Two on
+  // one wins that trade at ANY energy, so their health should not be the deciding condition -
+  // whether they have help should be.
+  //
+  // The exchange tables are unambiguous about this. Damage dealt vs taken over the following second,
+  // bucketed by local head-count, is roughly 1.1-1.3 at -1 and 2.5-4.3 at +1 across every range
+  // band; rec30 measured 2.84-3.96 at parity against 0.80-1.27 at -1. rec31 put it the other way
+  // round and got the same answer: as the SOLE attacker we lose the trade at every range under 30
+  // tiles (0.47-0.89), and win it 1.4-2.1x with a teammate on the same target. Numbers decide these
+  // fights far more than energy does.
+  //
+  // So this branch drops the "they are weak" requirement and pays for it with two stricter ones:
+  // we must be genuinely UP bodies rather than merely level, and the target must have nobody of
+  // theirs nearby to answer with. It is deliberately not a general aggression increase - remove
+  // either of those and it becomes the dive-into-a-crowd behavior that has cost this branch several
+  // rounds already.
+  constexpr float kOutnumberPressAdvantage = 1.0f;  // ScalarThresholdNode compares >=, so "+1 or better"
+  // Count includes the target itself, so below 2 means genuinely alone within kRocketIsolationRadius.
+  constexpr float kOutnumberPressMaxEnemiesNearTarget = 2.0f;
+  // Same reach as the ordinary rush. Pressing an isolated enemy is worth doing, but not worth
+  // crossing open ground for - that is how a bot arrives alone and becomes the isolated one.
+  constexpr float kOutnumberPressDistance = 20.0f;
+  // Same self-energy bar as the rush. The loosening here is about WHO we press, not about pressing
+  // while we are in no state to.
+  constexpr float kOutnumberPressMinEnergyPercent = 0.5f;
   constexpr u32 kRushRepelThreshold = 1;             // If we don't have this many reps dont rush targets
   // Only press a target we've spotted as low energy ourselves if we have enough energy left to
   // commit to closing the distance - otherwise we'd be diving in already weak.
@@ -904,6 +932,21 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                                         .End()
                                     .Child<BlackboardEraseNode>("recharge_timer") // remove recharge status as we're going in for the kill
                                     .Child<BlackboardEraseNode>("orbit_direction") // pick a fresh orbit direction next time we're back to circling
+                                    .End()
+                                .Sequence() // Outnumbering an isolated enemy is worth pressing on its own merits, whatever their energy - two on one wins the trade even against a healthy target. See kOutnumberPressAdvantage for the exchange numbers.
+                                    .Selector() // Same repel reserve rule as every other commit-forward branch: no way out of a dive gone wrong without one, unless we're the last alive and there's nothing left to preserve the life for.
+                                        .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold)
+                                        .InvertChild<BlackboardSetQueryNode>("team_centroid")
+                                        .End()
+                                    .Child<PlayerEnergyPercentThresholdNode>(kOutnumberPressMinEnergyPercent)
+                                    .Child<ScalarThresholdNode<float>>("local_advantage", kOutnumberPressAdvantage) // strictly up bodies, not merely level - at parity the trade is even and there's nothing here worth committing for
+                                    .InvertChild<ScalarThresholdNode<float>>("enemies_near_target_wide", kOutnumberPressMaxEnemiesNearTarget) // and they have nobody within 30 tiles to answer with. This is the condition doing the work: without it, "we outnumber them locally" and "they are about to be reinforced" look identical.
+                                    .InvertChild<DistanceThresholdNode>("target_position", "self_position", kOutnumberPressDistance)
+                                    .Child<RushCommitmentNode>("target", "local_advantage", kRushMaxTicks, kRushMaxAdvantageLoss, kRushAbortCooldownTicks) // Own instance, so its own commitment. Bounded the same way as the rush: if our head-count collapses on the way in, this stops being a 2v1 and the dive ends.
+                                    .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
+                                    .Child<ScalarNode>(1.0f, "rushing")
+                                    .Child<BlackboardEraseNode>("recharge_timer")
+                                    .Child<BlackboardEraseNode>("orbit_direction")
                                     .End()
                                 .Sequence() // Press the advantage for a while after the target loses energy (hit or spent shooting) and now has meaningfully less than we do.
                                     .InvertChild<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance * 2.0f) //still needs to be a fight we're actually in, not clear across the map
