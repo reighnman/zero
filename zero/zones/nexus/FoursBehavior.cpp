@@ -36,6 +36,7 @@
 #include <zero/zones/nexus/nodes/EnemiesNearTargetNode.h>
 #include <zero/zones/nexus/nodes/TeamFocusTargetNode.h>
 #include <zero/zones/nexus/nodes/PursuedFromBehindNode.h>
+#include <zero/zones/nexus/nodes/CruiseSpeedNode.h>
 #include <zero/zones/nexus/nodes/WallAvoidanceNode.h>
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
@@ -227,6 +228,13 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // 60 degrees still opens range - just on an arc back toward support rather than a straight line
   // into an empty corner of the map.
   constexpr float kFleeTeamBiasRadians = 1.05f;  // ~60 degrees
+
+  // Cruising speed as a fraction of the ship's top speed. Teams mostly hold station and trade shots
+  // until someone fails a dodge, and only then commits - so flat-out is the wrong default. A ship
+  // already at maximum has no acceleration left to dodge with and carries momentum it cannot
+  // cheaply reverse. Full speed is reserved for actually pressing a target ("rushing") and for
+  // running away (recharge_timer), both exempted below.
+  constexpr float kCruiseSpeedPercent = 0.8f;
 
   constexpr float kLeashDistance = 30.0f;
 
@@ -473,6 +481,11 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                     .Selector(CompositeDecorator::Success) // Keep the team's centre of mass fresh for the flee bias below - or clear it outright if we're the last one alive, so we don't retreat toward a dead teammate's last position.
                         .Child<TeamCentroidNode>("team_centroid")
                         .Child<BlackboardEraseNode>("team_centroid")
+                        .End()
+                    .Selector(CompositeDecorator::Success) // Hold something back unless we're committing to a kill or running for our life.
+                        .Child<BlackboardSetQueryNode>("rushing")            //Pressing a target - commit everything
+                        .InvertChild<TimerExpiredNode>("recharge_timer")     //Escaping - we want every bit of speed
+                        .Child<CruiseSpeedNode>(kCruiseSpeedPercent)
                         .End()
                     .End()
                 .Sequence(CompositeDecorator::Success) // Continuously reassess fight-vs-flee using energy relative to the target, instead of a fixed timer.
