@@ -777,12 +777,14 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                             .End()
                         .Child<DodgeIncomingDamage>(0.2f, 30.0f)
                         .End()
-                    .Sequence() // Keep distance from the target during ready-check instead of sitting still until the match officially starts.
-                        .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
-                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kFleeWallLookaheadSeconds, "team_centroid") //Long flee horizon - a retreat commits to 30-55 tiles, so the cast has to reach that far or we pick a corridor that dead ends. Additive unless actually cornered, in which case it takes the Selector and the flee below is skipped so nothing pushes us back into the pocket.
-                            .Child<FleeNode>("nearest_target_position", kLeashDistance, 5.0f, 0.2f, "nearest_target_energy")
-                            .End()
-                        .End()
+                    //NOTE: Fours has a "keep distance during ready-check" Sequence here, gated on
+                    //InvertChild<TimerExpiredNode>("match_startup"). It is deliberately absent: this
+                    //arena is an open public one with no ready check to wait out. It must stay
+                    //absent rather than being re-added without its guard - that guard was its ONLY
+                    //condition, so an unguarded copy is a Sequence whose single child is a Selector
+                    //ending in FleeNode, which always succeeds. Sitting in this Selector it would
+                    //take every tick and short-circuit the recharge branch and the whole fight tree
+                    //below, leaving the bot kiting forever without ever shooting.
                     .Sequence()  //Keep enemy distance while reacharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
                         .Child<BlackboardEraseNode>("rushing") //We're breaking off, so we are no longer pressing. Without this "rushing" is only ever cleared inside the aim-and-shoot Parallel below, which this branch skips entirely - so it stayed set for the whole retreat, keeping the commitment posture alive, bypassing the cruise-speed cap and the firing energy gate long after we stopped shooting.
