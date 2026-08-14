@@ -87,16 +87,31 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // is an absolute test of the present instant and none of them can notice the fight decaying
   // underneath us. See RushCommitmentNode.
   //
-  // Losing a net body since we committed is the abort. Not "outnumbered" - that is already checked
-  // separately and absolutely - but the specific case of starting supported and arriving alone,
-  // which is what a chase does to a formation: we leave at rush speed and our team does not.
-  constexpr float kRushMaxAdvantageLoss = 1.0f;
-  // ~2.5s. Long enough to cross the 20-tile rush range and land a kill, short enough that a target
-  // outrunning us stops being chased before we are across the map from our own team.
-  constexpr u32 kRushMaxTicks = 250;
-  // ~2s of not re-arming. The head-count fluctuates as players drift through the radius, so without
-  // a refractory period an abort lasts exactly one tick and we stall in place still deep in their half.
-  constexpr u32 kRushAbortCooldownTicks = 200;
+  // Loosened hard after rec30, where the bots stopped diving on weak targets altogether. The
+  // abort at a loss of 1 was measuring noise, not a collapsing fight. Local head-count over a
+  // 25-tile radius is distributed p10 -1 / p25 0 / median 0 / p75 +1 / p90 +1 across 15426
+  // samples, so a swing of one body is the ORDINARY tick-to-tick jitter of players drifting
+  // through the radius. Worse, it was biased: the rush arms whenever advantage >= 0, so it
+  // preferentially committed on a jitter peak of +1 and then aborted the moment it reverted to the
+  // median of 0. Commit on noise, abort on regression to the mean - a ratchet that suppressed the
+  // dive almost entirely, and then a 2s cooldown kept it suppressed.
+  //
+  // At 2.0 the abort only fires on a genuine collapse from a strong start (+2 or better down to
+  // parity), which is rare by construction. That is intentional: the delta check turns out to be
+  // largely redundant with the ABSOLUTE `local_advantage >= 0` gate one line above it in the rush
+  // sequence, which re-tests every tick and already ends the dive the instant we are outnumbered.
+  // The genuinely new thing this node contributes is the time bound below.
+  constexpr float kRushMaxAdvantageLoss = 2.0f;
+  // ~4s, up from 2.5s, which was cutting off the successful approach profile rather than a failing
+  // one. Measured over rec30's kills, a dive that lands takes about three seconds: median
+  // killer-victim range is 23.6t at T-3.0s, 18.3t at T-2.0s, 10.0t at T-1.0s. A 2.5s cap expired
+  // mid-approach, right where the bot had already paid the cost of closing and was about to
+  // collect on it.
+  constexpr u32 kRushMaxTicks = 400;
+  // ~0.75s. Enough to stop an abort re-arming on the very next tick and oscillating in place, but
+  // no longer a punishment: at 2s a single noise-driven abort silenced the dive for most of an
+  // engagement.
+  constexpr u32 kRushAbortCooldownTicks = 75;
   constexpr u32 kRushRepelThreshold = 1;             // If we don't have this many reps dont rush targets
   // Only press a target we've spotted as low energy ourselves if we have enough energy left to
   // commit to closing the distance - otherwise we'd be diving in already weak.
@@ -190,12 +205,24 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // fleeing one under a distance check, and rocketing at it is precisely the dive-into-a-crowd
   // behavior seen in play - we arrive at speed, in a group, with no thrust left to turn around.
   constexpr float kRocketMinOpeningSpeed = 3.0f;
-  // Rockets also require a positive local head-count, not merely a non-negative one. At parity the
-  // exchange is roughly even and there's nothing a limited item buys; committing one only makes
-  // sense when we're up bodies and a kill actually converts into an advantage.
-  constexpr float kRocketMinAdvantage = 1.0f;  // ScalarThresholdNode compares >=, so this is "+1 or better"
+  // Was +1 ("up bodies"), which combined with everything else meant rockets were never spent at
+  // all - reported directly after rec30, where the bots did not rocket down even extremely low
+  // targets. Note this cannot be checked against the recording: rockets are not a WeaponCode and
+  // not a status flag, so they leave no trace in a replay at all. The head-count distribution is
+  // what makes +1 so restrictive: p75 and p90 are both exactly +1, so it selected the top quarter
+  // of ticks, and it had to coincide with an isolated target under 16% energy, actively running,
+  // inside a 16-20 tile window, off cooldown, at 80% speed.
+  //
+  // At 0.0 this stops being an extra constraint and simply inherits the rush's own `>= 0` gate. The
+  // conditions that made rockets safe are all still here and are the ones that matter: the target
+  // must be nearly dead AND alone AND running. If deaths start tracing back to rockets again, this
+  // is the first thing to put back to 1.0.
+  constexpr float kRocketMinAdvantage = 0.0f;
 
-  constexpr float kRocketChaseMinDistance = 16.0f;
+  // Lowered from 16 so the window is actually usable. The rocket branch is nested inside the rush,
+  // which requires the target within kRushDistanceThreshold (20), so a 16-tile minimum left a
+  // 4-tile band for everything else to line up in.
+  constexpr float kRocketChaseMinDistance = 12.0f;
   constexpr float kRocketChaseMaxDistance = 35.0f;
 
   // --- Mines ---
@@ -211,7 +238,13 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // bots duly used mines offensively: in rec11 four of seven laid them while closing on the enemy
   // at 17-23 tiles/sec (radial -16.7 to -23.0), against the human's +19.2/+19.5 flat-out retreats.
   constexpr float kMineRearConeDegrees = 120.0f;
-  constexpr float kMinePursuitClosingSpeed = 6.0f;
+  // Raised from 6 after rec30, where the team laid 14 mines - more than the escape-tool framing
+  // above intends. The shape of the usage was right (own speed p50 17.3-19.5 tiles/sec, radial
+  // p50 +8.8 to +17.4, so every one was laid at speed while genuinely opening the range); there
+  // were simply too many, which points at the loosest condition rather than a wrong one. At 6
+  // tiles/sec a chaser only has to be drifting after us to qualify. 9 asks for someone committed
+  // to running us down, which is the situation a mine is actually meant to break off.
+  constexpr float kMinePursuitClosingSpeed = 9.0f;
   // Don't spend the one mine we get, plus its fire cost, unless we're healthy enough that surviving
   // the exchange is still the plan. Note this is a deliberately conservative rule rather than a
   // copy of the human, who laid his at 5-12% energy as a last resort.
@@ -434,7 +467,14 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // opponent it can clear with both sides near dead. rec28: retreating% rose to 51-64% but bots
   // still died at 5.9-13.2% energy, because the retreat ended before it reached its distance.
   // Lower this first if damage dealt falls or outnumbered% climbs from bots being away too long.
-  constexpr float kRetreatRecoveryEnergyPercent = 0.5f;
+  //
+  // rec30 is that recording, so this comes down from 0.5. Both teams ran this code; the four bots
+  // that lost spent 57-69% of hurt time retreating against 31-40% for the three that won, and dealt
+  // 2.16-2.94 damage/s against 6.69-7.50. They fired roughly half the volume of bullets (67-199 vs
+  // 300-325), and the corpus is unambiguous that volume of fire is what separates effective players
+  // from ineffective ones. At 0.35 a bot still leaves with a real buffer over the 0.18 critical
+  // floor, but stops sitting out most of the fight waiting to top up.
+  constexpr float kRetreatRecoveryEnergyPercent = 0.35f;
 
   // EnergyDisadvantageNode only ever compares us to the *current target's* energy, so it has no
   // notion of being outnumbered: in a 3v1 where the nearest enemy happens to be the hurt one, it

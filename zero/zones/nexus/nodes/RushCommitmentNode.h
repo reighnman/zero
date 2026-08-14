@@ -17,17 +17,24 @@ namespace nexus {
 // actually goes wrong: the fight was worth diving into when we started, and stopped being worth it
 // while we were on the way.
 //
-// The head-count test is the clearest case. `local_advantage >= 0` passes identically whether we
-// committed at +2 and have bled down to parity, or have been at parity all along. Those are not the
-// same situation. The first means our teammates are now behind us and theirs are ahead - we are
-// arriving alone into a group - which is precisely the shape that ends in a burned repel or a death.
-// Measuring the DROP since commitment catches it; no absolute threshold can, at any value.
+// THE TIME BOUND IS THE LOAD-BEARING HALF. A chase that has run for seconds without converting is
+// one we are losing on speed, and every additional second is spent further from our own team.
+// Nothing else in the sequence times out: the target stays weak (its estimate only recharges
+// slowly), the distance test keeps passing because we keep pace, and so the dive can run as long as
+// the target keeps running.
 //
-// The time bound covers the other half. A chase that has run for seconds without converting is one
-// we are losing on speed, and every additional second is spent further from our own team. Nothing
-// else in the sequence times out: the target stays weak (its estimate only recharges slowly), the
-// distance test keeps passing because we keep pace, and so the dive can run as long as the target
-// keeps running.
+// The advantage-drop check is the weaker half, and rec30 showed why it has to be set generously.
+// The idea was that `local_advantage >= 0` passes identically whether we committed at +2 and bled
+// down to parity or sat at parity throughout, and that only the first means we are arriving alone.
+// That is true, but the head-count is a discrete count over a 25-tile radius and its ordinary
+// jitter is +/-1 (p25 0, median 0, p75 +1 over 15426 samples), so a threshold of 1 fires on noise.
+// It fired asymmetrically too: the rush arms whenever advantage >= 0, so it committed on jitter
+// peaks and aborted on reversion to the mean, which suppressed diving almost completely.
+//
+// It is also mostly redundant. The rush sequence re-tests the absolute `local_advantage >= 0` gate
+// every tick, and that already ends the dive the moment we are actually outnumbered - which is the
+// real danger, not the delta. So set max_advantage_loss high enough that it only catches a genuine
+// collapse from a strong start, and let the absolute gate do the ordinary work.
 //
 // Returns Success while the dive remains justified and Failure once it does not, which drops the
 // tree through to the ordinary press/orbit/flee branches for the tick. It deliberately does NOT
