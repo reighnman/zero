@@ -54,9 +54,32 @@ namespace nexus {
 // marginal shot rather than toward wasting energy on one: MaximumThrust is used even though the
 // target may not hold the prizes for it, and no credit is taken for the rotation time a target
 // would need to dodge in any direction other than along its current heading.
+// CALIBRATION, after the first live test came back with bots firing 8 bombs between them in a whole
+// match against the human's 42. Two things were wrong, and the first is the important one:
+//
+//   1. The model estimates a *worst-case optimal* dodge - a target that reacts instantly, at full
+//      MaximumThrust, in the best possible direction. Real targets do not, which is why bombs
+//      measurably land 13-21% of the time at ranges this model calls hopeless. A pessimistic model
+//      is the right default when it only trims marginal shots, but here it was overruling
+//      measurement. Inside `always_allow_distance` the empirical result wins outright and the model
+//      is not consulted at all.
+//
+//   2. It ignored reaction time. A bomb has to be seen before it can be dodged, and the dodge only
+//      begins after that. Deducting `kReactionSeconds` from the usable dodge window is both more
+//      correct and, at the short flight times where bombs actually connect, significant.
+//
+// The squeeze this produced is worth recording, because neither gate looked wrong on its own:
+// BombBlastSafetyNode refuses to fire inside `blast_radius + margin` so we don't eat our own blast,
+// and this node refused to fire beyond ~12 tiles. Those two windows very nearly did not overlap,
+// leaving a band a couple of tiles wide. When adding a range gate, always check it against the
+// gates already bounding the *other* end.
 struct BombImpactLikelihoodNode : public behavior::BehaviorNode {
-  BombImpactLikelihoodNode(const char* target_player_key, const char* aim_key, float tolerance)
-      : target_player_key(target_player_key), aim_key(aim_key), tolerance(tolerance) {}
+  BombImpactLikelihoodNode(const char* target_player_key, const char* aim_key, float tolerance,
+                           float always_allow_distance)
+      : target_player_key(target_player_key),
+        aim_key(aim_key),
+        tolerance(tolerance),
+        always_allow_distance(always_allow_distance) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -78,7 +101,16 @@ struct BombImpactLikelihoodNode : public behavior::BehaviorNode {
     if (muzzle_speed <= 0.0f) return behavior::ExecuteResult::Failure;
 
     float distance = self->position.Distance(*opt_aim);
+
+    // Inside this band, bombs are measured to land often enough to be worth firing regardless of
+    // what the dodge model says. Measurement beats a deliberately pessimistic estimate.
+    if (distance <= always_allow_distance) return behavior::ExecuteResult::Success;
+
     float flight_time = distance / muzzle_speed;
+
+    // A bomb cannot be dodged before it is seen and responded to.
+    float dodge_time = flight_time - kReactionSeconds;
+    if (dodge_time <= 0.0f) return behavior::ExecuteResult::Success;
 
     u32 bombs = game.ship_controller.ship.bombs;
     if (bombs == 0) return behavior::ExecuteResult::Failure;
@@ -93,15 +125,20 @@ struct BombImpactLikelihoodNode : public behavior::BehaviorNode {
 
     // ShipController integrates velocity as thrust * (10/16) tiles/sec^2.
     float target_acceleration = settings.ShipSettings[target->ship].MaximumThrust * (10.0f / 16.0f);
-    float evasion_radius = 0.5f * target_acceleration * flight_time * flight_time;
+    float evasion_radius = 0.5f * target_acceleration * dodge_time * dodge_time;
 
     return evasion_radius <= hit_radius * tolerance ? behavior::ExecuteResult::Success
                                                     : behavior::ExecuteResult::Failure;
   }
 
+  // How long the target takes to notice a bomb and begin reacting to it. Only the remainder of the
+  // flight is usable dodge time.
+  static constexpr float kReactionSeconds = 0.25f;
+
   const char* target_player_key = nullptr;
   const char* aim_key = nullptr;
   float tolerance = 1.0f;
+  float always_allow_distance = 0.0f;
 };
 
 }  // namespace nexus
