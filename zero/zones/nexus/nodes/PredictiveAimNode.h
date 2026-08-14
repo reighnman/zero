@@ -43,6 +43,28 @@ namespace nexus {
 // worst head-on, where the inflated speed is muzzle + full ship speed - at a typical closing speed
 // that is roughly a third of the flight time, and so about a third of the lead, missing behind a
 // laterally moving target by more than a ship radius at ordinary fighting range.
+//
+// ---------------------------------------------------------------------------------------------
+// TWO AIM POINTS, AND WHY BOTH ARE NEEDED (`world_position_key`).
+//
+// Because the solve happens in the shooter's frame, the point it returns is a *shooter-frame* point:
+// `pTarget + (vTarget - vShooter) * t`. That is exactly what FaceNode wants, since aiming the hull at
+// it produces the correct heading. It is NOT where the bullet and the target actually meet in the
+// world - that point is `pTarget + vTarget * t`, which is this one displaced by `vShooter * t`.
+//
+// The firing gates need the world one. They build the trajectory with ShotVelocityQueryNode, which
+// returns `self->velocity + heading * weapon_speed` - a world-frame vector, correctly, since the
+// bullet really does inherit our momentum - and then cast a ray along it. Testing that world-frame
+// ray against a target box parked on the shooter-frame point compares two different reference frames,
+// and they differ by `vShooter * t`: at 15 tiles/sec of our own motion and a 1.6-second flight, some
+// 24 tiles of displacement against a box a few tiles wide.
+//
+// The consequence was not merely that shots were withheld. The gate opened only when the hull was
+// rotated *behind* the true lead by roughly the angle our own lateral motion contributes - because
+// that is the rotation that swings the world-frame ray back onto a box sitting at the shooter-frame
+// point. The bot was therefore selecting for under-led shots, at the exact moments it was moving
+// fastest across the target. Terrain is world-frame too, so ShotLineOfSightNode has the same
+// requirement - the lane a bullet actually flies down starts at us and ends at the world point.
 // ---------------------------------------------------------------------------------------------
 struct PredictiveAimNode : public behavior::BehaviorNode {
   PredictiveAimNode(WeaponType weapon_type, const char* target_player_key, const char* acceleration_key,
@@ -51,6 +73,15 @@ struct PredictiveAimNode : public behavior::BehaviorNode {
         target_player_key(target_player_key),
         acceleration_key(acceleration_key),
         position_key(position_key),
+        lead_bias_seconds(lead_bias_seconds) {}
+
+  PredictiveAimNode(WeaponType weapon_type, const char* target_player_key, const char* acceleration_key,
+                     const char* position_key, const char* world_position_key, float lead_bias_seconds = 0.2f)
+      : weapon_type(weapon_type),
+        target_player_key(target_player_key),
+        acceleration_key(acceleration_key),
+        position_key(position_key),
+        world_position_key(world_position_key),
         lead_bias_seconds(lead_bias_seconds) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
@@ -67,67 +98,88 @@ struct PredictiveAimNode : public behavior::BehaviorNode {
 
     float weapon_speed = behavior::GetWeaponSpeed(*ctx.bot->game, *self, weapon_type);
 
+    if (weapon_speed <= 0.0f) return behavior::ExecuteResult::Failure;
+
     Vector2f direction = Normalize(target->position - self->position);
-
-    // Scale the bias down at close range instead of always applying the full lead_bias_seconds -
-    // see the class comment for why.
     float distance = target->position.Distance(self->position);
-    float effective_lead_bias = lead_bias_seconds;
 
-    if (weapon_speed > 0.0f) {
-      float estimated_flight_time = distance / weapon_speed;
-      if (estimated_flight_time < effective_lead_bias) {
-        effective_lead_bias = estimated_flight_time;
-      }
-    }
+    // Straight-line distance is only a first guess at flight time - it ignores that the target is
+    // moving, which is the whole point of the exercise. Since the lead depends on the flight time and
+    // the flight time depends on the lead, solve, re-measure, and solve again. Two passes is enough:
+    // the second correction is already small compared to the ship radius.
+    float flight_time = distance / weapon_speed;
 
-    // Bend the target's velocity toward where they're actually trending before handing it to the
-    // constant-velocity solver below.
-    Vector2f biased_velocity = target->velocity + acceleration * effective_lead_bias;
-
-    float away_amount = biased_velocity.Dot(direction);
-
-    Vector2f target_velocity = biased_velocity;
-    // If the enemy is moving away too fast, ignore the away movement for this calculation.
-    if (away_amount > weapon_speed) {
-      // Remove the "away" velocity from the target so it's only moving side to side.
-      target_velocity = biased_velocity - direction * away_amount;
-    }
-
-    // The projectile speed handed to the solver must be the speed *relative to us*, i.e. the bare
-    // muzzle speed - see the class comment. Passing the world-frame speed here double-counts our own
-    // velocity and makes every shot under-lead.
-    std::optional<Vector2f> calculated_shot = behavior::CalculateShot(
-        self->position, target->position, self->velocity, target_velocity, weapon_speed);
-
-    // Default to target's position if the calculated shot fails.
+    // Default to the target's position if the solve fails outright.
     Vector2f aimshot = target->position;
 
-    if (calculated_shot.has_value()) {
+    for (int i = 0; i < kSolveIterations; ++i) {
+      // How far forward to carry the acceleration estimate. A target holding thrust for the whole
+      // flight travels an extra 0.5*a*t^2, and adding `a * bias` to their velocity displaces the aim
+      // point by `a * bias * t` - so the two agree at bias = t/2. Capped at lead_bias_seconds
+      // because nobody holds a single thrust direction for a second and a half, and because the
+      // longer the extrapolation the less the estimate is worth.
+      float effective_lead_bias = flight_time * 0.5f;
+      if (effective_lead_bias > lead_bias_seconds) effective_lead_bias = lead_bias_seconds;
+
+      // Bend the target's velocity toward where they're actually trending before handing it to the
+      // constant-velocity solver below.
+      Vector2f biased_velocity = target->velocity + acceleration * effective_lead_bias;
+
+      float away_amount = biased_velocity.Dot(direction);
+
+      Vector2f target_velocity = biased_velocity;
+      // If the enemy is moving away too fast, ignore the away movement for this calculation.
+      if (away_amount > weapon_speed) {
+        // Remove the "away" velocity from the target so it's only moving side to side.
+        target_velocity = biased_velocity - direction * away_amount;
+      }
+
+      // The projectile speed handed to the solver must be the speed *relative to us*, i.e. the bare
+      // muzzle speed - see the class comment. Passing the world-frame speed here double-counts our own
+      // velocity and makes every shot under-lead.
+      std::optional<Vector2f> calculated_shot = behavior::CalculateShot(
+          self->position, target->position, self->velocity, target_velocity, weapon_speed);
+
+      if (!calculated_shot.has_value()) break;
+
       aimshot = *calculated_shot;
+      flight_time = self->position.Distance(aimshot) / weapon_speed;
+    }
 
-      constexpr float kFarDistance = 50.0f;
+    constexpr float kFarDistance = 50.0f;
 
-      // Set the aimshot directly to the player position if it is too far away.
-      if (aimshot.DistanceSq(target->position) > kFarDistance * kFarDistance) {
-        aimshot = target->position;
-      }
+    // Set the aimshot directly to the player position if it is too far away.
+    if (aimshot.DistanceSq(target->position) > kFarDistance * kFarDistance) {
+      aimshot = target->position;
+    }
 
-      // If the aimshot is behind us but the target isn't, just shoot at the target.
-      if ((aimshot - self->position).Dot(target->position - self->position) < 0.0f) {
-        aimshot = target->position;
-      }
+    // If the aimshot is behind us but the target isn't, just shoot at the target.
+    if ((aimshot - self->position).Dot(target->position - self->position) < 0.0f) {
+      aimshot = target->position;
     }
 
     ctx.blackboard.Set(position_key, aimshot);
 
+    if (world_position_key) {
+      // Where the shot and the target actually meet on the map, for the trajectory and terrain gates
+      // - see the class comment. Recomputed from the final aimshot so the fallbacks above are
+      // carried through rather than left pointing at a lead that was discarded.
+      float final_flight_time = self->position.Distance(aimshot) / weapon_speed;
+
+      ctx.blackboard.Set(world_position_key, aimshot + self->velocity * final_flight_time);
+    }
+
     return behavior::ExecuteResult::Success;
   }
+
+  // Predict, re-measure the flight time against the predicted point, predict again.
+  static constexpr int kSolveIterations = 2;
 
   WeaponType weapon_type;
   const char* target_player_key = nullptr;
   const char* acceleration_key = nullptr;
   const char* position_key = nullptr;
+  const char* world_position_key = nullptr;
   float lead_bias_seconds = 0.2f;
 };
 
