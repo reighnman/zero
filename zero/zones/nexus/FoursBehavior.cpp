@@ -34,6 +34,7 @@
 #include <zero/zones/nexus/nodes/TeamCentroidNode.h>
 #include <zero/zones/nexus/nodes/IncomingBlastDamageNode.h>
 #include <zero/zones/nexus/nodes/RocketUsageNode.h>
+#include <zero/zones/nexus/nodes/RushCommitmentNode.h>
 #include <zero/zones/nexus/nodes/MineAvailableNode.h>
 #include <zero/zones/nexus/nodes/EnemiesNearTargetNode.h>
 #include <zero/zones/nexus/nodes/TeamFocusTargetNode.h>
@@ -110,6 +111,20 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // inside 10 tiles means never reproducing that dive at all, since by then the kill has either
   // happened or the target has slipped away.
   constexpr float kRushDistanceThreshold = 20.0f;
+  // A dive is judged once at commitment and then bounded, because every other condition on the rush
+  // is an absolute test of the present instant and none of them can notice the fight decaying
+  // underneath us. See RushCommitmentNode.
+  //
+  // Losing a net body since we committed is the abort. Not "outnumbered" - that is already checked
+  // separately and absolutely - but the specific case of starting supported and arriving alone,
+  // which is what a chase does to a formation: we leave at rush speed and our team does not.
+  constexpr float kRushMaxAdvantageLoss = 1.0f;
+  // ~2.5s. Long enough to cross the 20-tile rush range and land a kill, short enough that a target
+  // outrunning us stops being chased before we are across the map from our own team.
+  constexpr u32 kRushMaxTicks = 250;
+  // ~2s of not re-arming. The head-count fluctuates as players drift through the radius, so without
+  // a refractory period an abort lasts exactly one tick and we stall in place still deep in their half.
+  constexpr u32 kRushAbortCooldownTicks = 200;
   constexpr u32 kRushRepelThreshold = 1;             // If we don't have this many reps dont rush targets
   // Only press a target we've spotted as low energy ourselves if we have enough energy left to
   // commit to closing the distance - otherwise we'd be diving in already weak.
@@ -795,6 +810,7 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                                     .Child<ScalarThresholdNode<float>>("local_advantage", 0.0f) //diving while outnumbered loses the exchange ~2:1 no matter how weak the target looks
                                     .InvertChild<DistanceThresholdNode>("target_position", "self_position", kRushDistanceThreshold)
                                     .InvertChild<ScalarThresholdNode<float>>("target_energy", kLowEnergyRushThreshold)
+                                    .Child<RushCommitmentNode>("target", "local_advantage", kRushMaxTicks, kRushMaxAdvantageLoss, kRushAbortCooldownTicks) // Last gate before we actually commit, so it only counts ticks where everything above already held. Every condition above is an absolute test of this instant; this is the only one that can see the fight getting worse than the one we chose to dive into.
                                     .Child<SeekNode>("aimshot", 0.0f, SeekNode::DistanceResolveType::Static)
                                     .Child<ScalarNode>(1.0f, "rushing") // set rushing status
                                     .Sequence(CompositeDecorator::Success) //Rocket down a fleeing kill, but only once we're already moving - lit from slow it mostly buys back speed we'd have reached anyway, and it overshoots.
