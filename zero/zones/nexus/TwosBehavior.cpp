@@ -413,6 +413,20 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
   // in permanent retreat.
   constexpr float kCriticalEnergyPercent = 0.18f;
 
+  // Absolute floor on ENDING a retreat. The ratio test above only says whether we're still losing
+  // the comparison, and while we're away recharging so is the enemy - so against an equally hurt
+  // opponent it can clear with both sides near dead, sending us back into a fight we're still too
+  // weak for. rec28 showed exactly that: retreating% rose to 51-64% but bots still died at
+  // 5.9-13.2% energy and their retreats plateaued at 36 tiles against a ramp asking for 49-55,
+  // because the retreat ended before they ever arrived.
+  //
+  // 0.5 rather than higher because a retreating bot is nearly silent: the return-fire branch is
+  // capped at kMaxBulletRange (35) and the flee ramp holds us at 49-55 tiles while hurt, so time
+  // spent recovering is time the team is effectively a body down. That tradeoff is what turned the
+  // rec17 over-retreat into a 12-0 loss, and this is the constant that governs it - if damage dealt
+  // falls or outnumbered% climbs because bots are away too long, lower this first.
+  constexpr float kRetreatRecoveryEnergyPercent = 0.5f;
+
   // EnergyDisadvantageNode only ever compares us to the *current target's* energy, so it has no
   // notion of being outnumbered: in a 3v1 where the nearest enemy happens to be the hurt one, it
   // reports no disadvantage at all and the bot keeps fighting. That is the gap these two rules
@@ -593,7 +607,7 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
                         .End()
                     .End()
                 .Sequence(CompositeDecorator::Success) // Continuously reassess fight-vs-flee using energy relative to the target, instead of a fixed timer.
-                    .Child<EnergyDisadvantageNode>("nearest_target", "nearest_target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent) //Judge fight-vs-flee against the enemy actually on top of us. Comparing against the team focus target meant a bot could be losing badly to someone at 3 tiles while reporting no disadvantage because the far target it had chosen to shoot was weaker.
+                    .Child<EnergyDisadvantageNode>("nearest_target", "nearest_target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent, kRetreatRecoveryEnergyPercent) //Judge fight-vs-flee against the enemy actually on top of us. Comparing against the team focus target meant a bot could be losing badly to someone at 3 tiles while reporting no disadvantage because the far target it had chosen to shoot was weaker.
                     .Child<TimerSetNode>("recharge_timer", 200)
                     .End()
                 .Sequence(CompositeDecorator::Success) // Badly outnumbered - leave regardless of how the nearest duel happens to be going.

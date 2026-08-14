@@ -172,6 +172,15 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   constexpr float kEnergyDisadvantageExitRatio = 0.9f;
   constexpr float kCriticalEnergyPercent = 0.18f;
 
+  // Absolute floor on ENDING a retreat. The ratio test only says whether we're still losing the
+  // comparison, and while we're away recharging so is the opponent - so against an equally hurt
+  // one it can clear with both sides near dead, sending us back into a fight we're still too weak
+  // for. rec28 showed exactly that in the team trees: retreating% rose but bots still died at
+  // 5.9-13.2% energy because the retreat ended before they reached the distance they were heading
+  // for. This matters more in a duel, where the only opponent is by definition the one we're
+  // recharging against.
+  constexpr float kRetreatRecoveryEnergyPercent = 0.5f;
+
   // Hard floor on engaging at all, and the single exemption to it: a fight we can end this second.
   constexpr float kEngageFloorEnergyPercent = 0.15f;
   constexpr float kFinishRelativeEnergyPercent = 0.5f;
@@ -241,7 +250,7 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                         .End()
                     .End()
                 .Sequence(CompositeDecorator::Success) // Continuously reassess fight-vs-flee using energy relative to the opponent, instead of a fixed timer.
-                    .Child<EnergyDisadvantageNode>("nearest_target", "nearest_target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent)
+                    .Child<EnergyDisadvantageNode>("nearest_target", "nearest_target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent, kRetreatRecoveryEnergyPercent)
                     .Child<TimerSetNode>("recharge_timer", 200)
                     .End()
                 .Sequence(CompositeDecorator::Success) // Hard floor: below this we don't engage at all. Stated separately from the critical percent above so retuning that can't quietly repeal this.

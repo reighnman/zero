@@ -394,6 +394,13 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // in permanent retreat.
   constexpr float kCriticalEnergyPercent = 0.18f;
 
+  // Absolute floor on ENDING a retreat. The ratio test only says whether we are still losing the
+  // comparison, and while we are away recharging so is the enemy - so against an equally hurt
+  // opponent it can clear with both sides near dead. rec28: retreating% rose to 51-64% but bots
+  // still died at 5.9-13.2% energy, because the retreat ended before it reached its distance.
+  // Lower this first if damage dealt falls or outnumbered% climbs from bots being away too long.
+  constexpr float kRetreatRecoveryEnergyPercent = 0.5f;
+
   // EnergyDisadvantageNode only ever compares us to the *current target's* energy, so it has no
   // notion of being outnumbered: in a 3v1 where the nearest enemy happens to be the hurt one, it
   // reports no disadvantage at all and the bot keeps fighting. That is the gap these two rules
@@ -529,7 +536,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                         .End()
                     .End()
                 .Sequence(CompositeDecorator::Success) // Continuously reassess fight-vs-flee using energy relative to the target, instead of a fixed timer.
-                    .Child<EnergyDisadvantageNode>("nearest_target", "nearest_target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent) //Judge fight-vs-flee against the enemy actually on top of us. Comparing against the team focus target meant a bot could be losing badly to someone at 3 tiles while reporting no disadvantage because the far target it had chosen to shoot was weaker.
+                    .Child<EnergyDisadvantageNode>("nearest_target", "nearest_target_energy", "energy_disadvantaged", kEnergyDisadvantageEnterRatio, kEnergyDisadvantageExitRatio, kCriticalEnergyPercent, kRetreatRecoveryEnergyPercent) //Judge fight-vs-flee against the enemy actually on top of us. Comparing against the team focus target meant a bot could be losing badly to someone at 3 tiles while reporting no disadvantage because the far target it had chosen to shoot was weaker.
                     .Child<TimerSetNode>("recharge_timer", 200)
                     .End()
                 .Sequence(CompositeDecorator::Success) // Badly outnumbered - leave regardless of how the nearest duel happens to be going.
