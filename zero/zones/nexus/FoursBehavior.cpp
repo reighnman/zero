@@ -42,6 +42,8 @@
 #include <zero/zones/nexus/nodes/DodgeIncomingDamage.h>
 #include <zero/zones/nexus/nodes/DodgeJukeNode.h>
 #include <zero/zones/nexus/nodes/EnergyDisadvantageNode.h>
+#include <zero/zones/nexus/nodes/TargetEnergyDropNode.h>
+#include <zero/zones/nexus/nodes/FinishableTargetNode.h>
 #include <zero/zones/trenchwars/nodes/AttachNode.h>
 #include <zero/zones/nexus/nodes/PlayerByNameNode.h>
 #include <zero/zones/nexus/nodes/PredictiveAimNode.h>
@@ -457,26 +459,17 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
             .Sequence() // Find nearest target and either path to them or seek them directly.              
                 .Sequence(CompositeDecorator::Success)
                     .Child<PlayerPositionQueryNode>("self_position")
-                    .Sequence() 
+                    .Sequence() //Base pick: the genuinely nearest enemy, kept under its own keys as well. "target" gets overridden by the team focus and low-energy rules below, and every defensive check needs the one actually on top of us rather than the one we've chosen to shoot.
                         .Child<NearestMemoryTargetNode>("target")
-                        .Child<NearestMemoryTargetNode>("nearest_target") //Keep a handle on the genuinely nearest enemy - "target" gets overridden by the team focus and low-energy rules below, and the flee-side checks need the one actually on top of us
-                        .Child<PlayerEnergyQueryNode>("nearest_target", "nearest_target_energy") //Defensive decisions compare against whoever is actually on us, not whoever we've chosen to shoot
-                        .Child<PlayerPositionQueryNode>("target", "target_position")
-                        .Child<PlayerEnergyQueryNode>("target", "target_energy")
-                        .Child<TargetAccelerationNode>("target", "target_acceleration")
-                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds)
-                        .Child<PredictiveAimNode>(WeaponType::Bomb, "target", "target_acceleration", "bomb_aimshot", kAimLeadBiasSeconds) //Bombs fly slower than bullets, so they need their own (larger) lead
-                        .Child<PlayerPositionQueryNode>("target", "nearest_target_position") //Addionally copy to nearest so we can use it later
-                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "nearest_aimshot", kAimLeadBiasSeconds)
+                        .Child<NearestMemoryTargetNode>("nearest_target")
+                        .Child<PlayerEnergyQueryNode>("nearest_target", "nearest_target_energy")
+                        .Child<PlayerPositionQueryNode>("nearest_target", "nearest_target_position")
+                        .Child<TargetAccelerationNode>("nearest_target", "nearest_target_acceleration")
+                        .Child<PredictiveAimNode>(WeaponType::Bullet, "nearest_target", "nearest_target_acceleration", "nearest_aimshot", kAimLeadBiasSeconds)
                         .End()
                      .Sequence(CompositeDecorator::Success) //Fight what the team is fighting, unless someone is already on top of us
-                        .Child<DistanceThresholdNode>("target_position", "self_position", kSelfDefenseDistance) //If an enemy is right on us, deal with them instead
+                        .Child<DistanceThresholdNode>("nearest_target_position", "self_position", kSelfDefenseDistance) //If an enemy is right on us, deal with them instead
                         .Child<TeamFocusTargetNode>("target")
-                        .Child<PlayerPositionQueryNode>("target", "target_position")  //Override
-                        .Child<PlayerEnergyQueryNode>("target", "target_energy")  //Override
-                        .Child<TargetAccelerationNode>("target", "target_acceleration")  //Override
-                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds) //Override
-                        .Child<PredictiveAimNode>(WeaponType::Bomb, "target", "target_acceleration", "bomb_aimshot", kAimLeadBiasSeconds) //Override
                         .End()
                      .Sequence(CompositeDecorator::Success) //If is someone low nearby override target
                         .Child<TimerExpiredNode>("recharge_timer") //Nearest target should be used when recharing
@@ -486,11 +479,14 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                         .InvertChild<DistanceThresholdNode>("lowest_target_position", "self_position", kLowEnergyDistanceThreshold)
                         .InvertChild<ScalarThresholdNode<float>>("lowest_target_energy", kLowEnergyThreshold)
                         .Child<LowestTargetNode>("target")
-                        .Child<PlayerPositionQueryNode>("target", "target_position")  //Override
-                        .Child<PlayerEnergyQueryNode>("target", "target_energy")  //Override
-                        .Child<TargetAccelerationNode>("target", "target_acceleration")  //Override
-                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds) //Override
-                        .Child<PredictiveAimNode>(WeaponType::Bomb, "target", "target_acceleration", "bomb_aimshot", kAimLeadBiasSeconds) //Override
+                        .End()
+                     .Sequence(CompositeDecorator::Success) //Derive everything else once, from whichever target actually survived the override chain above.
+                        .Child<PlayerPositionQueryNode>("target", "target_position")
+                        .Child<PlayerEnergyQueryNode>("target", "target_energy")
+                        .Child<TargetAccelerationNode>("target", "target_acceleration")
+                        .Child<PredictiveAimNode>(WeaponType::Bullet, "target", "target_acceleration", "aimshot", kAimLeadBiasSeconds)
+                        .Child<PredictiveAimNode>(WeaponType::Bomb, "target", "target_acceleration", "bomb_aimshot", kAimLeadBiasSeconds) //Bombs fly slower than bullets, so they need their own (larger) lead
+                        .Child<TargetEnergyDropNode>("target", "target_energy", "target_energy_dropped") //Did *this* target just lose energy - identity-checked, so a target switch is no longer misread as a hit
                         .End()
                 .End()
                 .Sequence(CompositeDecorator::Success) // If we have a portal but no location, lay one down.
@@ -558,6 +554,22 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
                     .InvertChild<ScalarThresholdNode<float>>("local_advantage", 0.0f)
                     .InvertChild<PlayerEnergyPercentThresholdNode>(kOutnumberedRetreatEnergy)
                     .Child<TimerSetNode>("recharge_timer", 200)
+                    .End()
+                .Selector(CompositeDecorator::Success) // Below the engage floor the only fight worth staying in is one we can end. Everything else above has already set recharge_timer by now; this is the single exception that takes it back off.
+                    .Sequence()
+                        .InvertChild<PlayerEnergyPercentThresholdNode>(kEngageFloorEnergyPercent) // we're under the floor
+                        .Child<FinishableTargetNode>("target", "target_energy", kFinishRelativeEnergyPercent, kFinishAbsoluteEnergyPercent) // ...but they're clearly lower and nearly dead
+                        .InvertChild<DistanceThresholdNode>("target_position", "self_position", kFinishDistance) // close enough to actually land it
+                        .Child<VisibilityQueryNode>("target_position") // no pathing across the map at this energy
+                        .Child<ScalarThresholdNode<float>>("local_advantage", 0.0f) // and not while their friends are the ones nearby
+                        .Selector() // A dive without a repel in reserve has no way out if it goes wrong. Last one alive there's nobody left to wait for, so take the chance.
+                            .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold)
+                            .InvertChild<BlackboardSetQueryNode>("team_centroid")
+                            .End()
+                        .Child<ScalarNode>(1.0f, "finishing")
+                        .Child<BlackboardEraseNode>("recharge_timer")
+                        .End()
+                    .Child<BlackboardEraseNode>("finishing")
                     .End()
                 .Selector()
                     .Sequence() // Attempt to dodge and use defensive items.
