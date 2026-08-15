@@ -116,7 +116,7 @@ struct FleeNode : public behavior::BehaviorNode {
       }
     }
 
-    return AvoidEnemiesAhead(ctx, self, desired);
+    return ChooseEscapeDirection(ctx, self, desired);
   }
 
   static Vector2f Rotate(const Vector2f& v, float radians) {
@@ -126,13 +126,20 @@ struct FleeNode : public behavior::BehaviorNode {
     return Vector2f(v.x * c - v.y * s, v.x * s + v.y * c);
   }
 
-  // Don't retreat into the arms of whoever else is on their team.
+  // Pick an escape that is actually escapable: not into their other players, and not into a wall.
   //
   // Everything upstream of this reasons only about the enemy we are running FROM. The direction that
   // opens the most range from them is frequently the direction their teammate is holding, and a bot
   // reversing at 13 tiles/sec into a waiting second enemy is how a break-off turns into a kill for
   // the other side. The team-centroid bias helps by accident when our side happens to sit opposite
   // theirs, and not at all otherwise.
+  //
+  // Terrain belongs in the same decision, not in a separate pass, because the two are used together:
+  // an enemy holding station beside a wall is funnelling, and the wall is doing as much of the work
+  // as they are. Score them apart and each looks survivable on its own - the lane past the enemy has
+  // room, the lane along the wall has no enemy in it - while the pair of them leaves only one way to
+  // go. WallAvoidanceNode still runs ahead of this and still owns the cornered case; what it cannot
+  // do is choose, because it is a correction applied to a heading that has already been picked.
   //
   // This is a check on the direction of TRAVEL, which is not the direction the ship is pointing.
   // While retreating FleeNode deliberately holds the nose on the threat and lets the Actuator resolve
@@ -143,7 +150,7 @@ struct FleeNode : public behavior::BehaviorNode {
   // correction applied to an already-chosen heading only ever nudges - it cannot conclude that a
   // whole side is a bad idea. Deviation from `desired` is itself part of the cost, so with a clear
   // lane this returns `desired` unchanged.
-  Vector2f AvoidEnemiesAhead(behavior::ExecuteContext& ctx, Player& self, const Vector2f& desired) {
+  Vector2f ChooseEscapeDirection(behavior::ExecuteContext& ctx, Player& self, const Vector2f& desired) {
     Game& game = *ctx.bot->game;
     RegionRegistry& region_registry = *ctx.bot->bot_controller->region_registry;
 
@@ -168,7 +175,7 @@ struct FleeNode : public behavior::BehaviorNode {
       blockers[blocker_count++] = player->position;
     }
 
-    if (blocker_count == 0) return desired;
+    float ship_radius = game.connection.settings.ShipSettings[self.ship].GetRadius() / 16.0f;
 
     Vector2f best = desired;
     float best_cost = -1.0f;
@@ -180,6 +187,19 @@ struct FleeNode : public behavior::BehaviorNode {
       // Turning away from the best escape costs something, so a lane is only abandoned when it is
       // genuinely occupied rather than because an enemy is vaguely off to that side.
       float cost = fabsf(offset) * kDeviationWeight;
+
+      // How far we could actually run this way before terrain stops us. Cast from the hull rather
+      // than the centre so a wall we are already scraping doesn't read as zero room in every
+      // direction at once.
+      CastResult terrain =
+          game.GetMap().Cast(self.position + candidate * ship_radius, candidate, kEscapeLookahead, self.frequency);
+
+      float open = terrain.hit ? terrain.distance : kEscapeLookahead;
+      float shortfall = 1.0f - (open / kEscapeLookahead);
+
+      // Squared, so a wall at the far end of the lane is nearly free while one in our face is not.
+      // A retreat that runs out of room in ten tiles is not a retreat.
+      cost += shortfall * shortfall * kTerrainWeight;
 
       for (size_t i = 0; i < blocker_count; ++i) {
         Vector2f to_blocker = blockers[i] - self.position;
@@ -355,6 +375,11 @@ struct FleeNode : public behavior::BehaviorNode {
   // Set so one enemy squarely in the lane at point-blank (cost 4.0) outweighs the full 60 degrees of
   // deviation on offer (cost 1.05), while one loitering at the far end of the corridor does not.
   static constexpr float kBlockerWeight = 4.0f;
+  // Above kBlockerWeight on purpose. A lane that dead-ends is worse than a lane with someone in it:
+  // running past an enemy still opens range, running into a wall stops us dead in front of the one
+  // already chasing. The ordering is what solves the funnel - beside a wall the wall lane costs up
+  // to 6.0 and the enemy lane up to 4.0, so a clear lane 60 degrees off at 1.05 wins both.
+  static constexpr float kTerrainWeight = 6.0f;
   static constexpr size_t kMaxBlockers = 16;
 
   const char* team_position_key = nullptr;
