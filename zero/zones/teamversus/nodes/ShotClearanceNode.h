@@ -215,9 +215,14 @@ struct ShotClearanceNode : public behavior::BehaviorNode {
   // never going to connect.
   float max_flight_time = 1.5f;
 
-  // How much of that window a target moving at full speed gives up. At 0.4 a stationary target may
-  // be shot at across the full flight time and one at the speed cap gets 60% of it.
-  float mobility_penalty = 0.4f;
+  // How much of that window a target moving at full speed gives up. At 0.25 a stationary target may
+  // be shot at across the full flight time and one at the speed cap gets 75% of it.
+  //
+  // Deliberately mild, because it multiplies with the cap above and the two together are what
+  // decides whether the bot fires at all. Most shots in a real fight are at a moving target, so a
+  // heavy penalty here is really just a lower cap wearing a disguise - and the corpus says humans
+  // take those shots.
+  float mobility_penalty = 0.25f;
 
   // Blast tolerances, as a fraction of the bomb's maximum damage (750 here, 44% of a full tank).
   //

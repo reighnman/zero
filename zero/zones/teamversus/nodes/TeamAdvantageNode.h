@@ -54,6 +54,9 @@ struct TeamAdvantageNode : public behavior::BehaviorNode {
     Player* nearest_teammate = nullptr;
     float nearest_teammate_dist_sq = std::numeric_limits<float>::max();
 
+    Player* nearest_enemy = nullptr;
+    float nearest_enemy_dist_sq = std::numeric_limits<float>::max();
+
     for (size_t i = 0; i < pm.player_count; ++i) {
       Player* player = pm.players + i;
 
@@ -75,6 +78,11 @@ struct TeamAdvantageNode : public behavior::BehaviorNode {
       } else {
         enemies_alive += 1.0f;
 
+        if (dist_sq < nearest_enemy_dist_sq) {
+          nearest_enemy_dist_sq = dist_sq;
+          nearest_enemy = player;
+        }
+
         if (dist_sq <= radius_sq) enemies_near += 1.0f;
       }
     }
@@ -84,6 +92,27 @@ struct TeamAdvantageNode : public behavior::BehaviorNode {
     ctx.blackboard.Set<float>("local_advantage", friends_near - enemies_near);
     ctx.blackboard.Set<float>("team_alive", team_alive);
     ctx.blackboard.Set<float>("enemies_alive", enemies_alive);
+
+    // The closest enemy, which is a different question from who we have chosen to shoot at and is
+    // published separately for that reason. Target selection scores isolation and weakness heavily,
+    // so the enemy worth aiming at is regularly not the one physically on top of us - and in the
+    // human corpus that is normal, not a fault: humans shoot past the nearest enemy about as often
+    // as the bots do (median shot at the second-nearest, 2-3 tiles further out).
+    //
+    // What humans do *not* do is let that choice drive their feet. They hold and break range against
+    // whoever is closest while shooting at whoever is worth shooting. Movement anchored on the aim
+    // target instead is how a bot ends up drifting toward a distant isolated enemy with three others
+    // in its lap, which shows up as a radial velocity of -0.8 tiles/sec while outnumbered where
+    // humans measure +3.5.
+    if (nearest_enemy) {
+      ctx.blackboard.Set<Player*>("nearest_enemy", nearest_enemy);
+      ctx.blackboard.Set<Vector2f>("nearest_enemy_position", nearest_enemy->position);
+      ctx.blackboard.Set<float>("nearest_enemy_distance", sqrtf(nearest_enemy_dist_sq));
+    } else {
+      ctx.blackboard.Erase("nearest_enemy");
+      ctx.blackboard.Erase("nearest_enemy_position");
+      ctx.blackboard.Erase("nearest_enemy_distance");
+    }
 
     // Our own isolation, measured exactly the way the victim-prediction data measures it. Real
     // players who died were a median 41 tiles from support two seconds beforehand against a 27 tile

@@ -128,7 +128,12 @@ struct EngagementPhaseNode : public behavior::BehaviorNode {
   // 11 tiles), and Recover opens past effective return fire.
   float standoff_press = 10.0f;
   float standoff_poke = 26.0f;
-  float standoff_recover = 42.0f;
+  // Recover used to sit at 42, which no measured player ever holds. Humans down two or more heads
+  // are at a median 16 tiles from their nearest enemy and *opening* at 3.5 tiles/sec - they break
+  // range continuously rather than sprinting to a safe radius, because the people chasing them are
+  // faster than the gap they are trying to open. 34 asks for a firm, sustained withdrawal from a
+  // typical outnumbered range without demanding a full-speed flight the ship cannot win anyway.
+  float standoff_recover = 34.0f;
 
   u32 min_dwell_ticks = 60;
 

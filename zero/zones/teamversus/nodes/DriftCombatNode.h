@@ -62,7 +62,14 @@ struct DriftCombatNode : public behavior::BehaviorNode {
     if (!opt_aimshot || !opt_target_position) return behavior::ExecuteResult::Failure;
 
     Vector2f aimshot = *opt_aimshot;
-    Vector2f target_position = *opt_target_position;
+
+    // Aim at the chosen target; hold range against whoever is actually closest. Those are two
+    // different enemies more often than not, and conflating them is what put this node's radial
+    // velocity at -0.8 tiles/sec while outnumbered where humans measure +3.5. Standoff is a question
+    // about the nearest threat - it is the one that decides how much damage arrives - while the aim
+    // point is a question about who is worth killing. Falls back to the aim target when no separate
+    // nearest enemy is published, which keeps single-opponent behavior identical.
+    Vector2f target_position = ctx.blackboard.ValueOr<Vector2f>("nearest_enemy_position", *opt_target_position);
 
     auto& game = *ctx.bot->game;
     auto& steering = ctx.bot->bot_controller->steering;
@@ -118,9 +125,15 @@ struct DriftCombatNode : public behavior::BehaviorNode {
   // Tangential speed to try to maintain, in tiles/sec. Close to the measured median closing speed.
   float orbit_speed = 13.0f;
 
-  // How hard to correct a radius error. Low enough that being 10 tiles out of position produces a
-  // firm pull rather than a headlong charge.
-  float radial_gain = 0.9f;
+  // How hard to correct a radius error, as a desired radial speed per tile of error.
+  //
+  // Calibrated against measured human radial velocity rather than picked. Humans close at a median
+  // -2.7 tiles/sec while even or up, from a held range of about 31 tiles, and open at +3.5 while
+  // outnumbered from about 16. Those are gentle numbers: a fight is a slow squeeze, not a charge and
+  // a bolt. At 0.9 this node asked for (26-31)*0.9 = -4.5 closing and (34-16)*0.9 = 16 opening,
+  // the latter clamped by top speed into a full-speed flight nobody does. At 0.35 the same two
+  // situations produce -1.8 and +6.3, which sit either side of the human figures.
+  float radial_gain = 0.35f;
 
   // How far the standoff swings either side of its nominal value, in tiles. The measured half-cycle
   // sweeps about 10 tiles, so half of that either way.

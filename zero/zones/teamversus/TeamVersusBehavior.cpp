@@ -149,13 +149,28 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
   constexpr float kBulletMaxRange = 45.0f;
   // Longest world-frame flight each weapon will accept - how much warning we are willing to give the
   // target. This is what makes our own velocity part of the fire decision: a shot leaves at our
-  // velocity plus the muzzle velocity, so standing still means 12.5 tiles/sec, slower than the ship
-  // it is chasing, and at 30 tiles that is a 2.4 second flight nobody sits still for. Bullets are
-  // held tight because they need a real hit; bombs and thors are looser because a late bomb still
-  // denies the ground it lands on.
-  constexpr float kBulletMaxFlightTime = 1.5f;
-  constexpr float kBombMaxFlightTime = 2.2f;
-  constexpr float kThorMaxFlightTime = 2.2f;
+  // velocity plus the muzzle velocity, so standing still it crosses the ground at 12.5 tiles/sec,
+  // slower than the ship it is chasing.
+  //
+  // Calibrated against what humans actually accept, measured over the pvp corpus as distance to the
+  // enemy the shot was pointed at over |v_self + heading*12.5|:
+  //
+  //     bullet flight seconds   p50 1.3-2.4   p75 1.8-3.5   p90 2.9-5.6
+  //     shot ground speed       p10 11-20     p50 20-29
+  //
+  // The first version of this gate sat at 1.5s, which would have refused more than half of every
+  // human bullet in the corpus - it was set from how long a shot *should* take rather than from how
+  // long the people who win actually let one take. Humans tolerate long flights freely; what they do
+  // not do is fire *slow* shots, and their ground-speed p10 sits at or above the bare muzzle speed
+  // because they are nearly always moving into the shot.
+  //
+  // A flight-time cap expresses that correctly without a second gate, because slow and far are the
+  // same thing to it: at 3 seconds a stationary ship may still shoot 37 tiles, while one whose own
+  // motion is subtracting from the shot (5 tiles/sec of ground speed, which is where this zone's
+  // bots were sitting at p10 against a human 14) is cut off past 15.
+  constexpr float kBulletMaxFlightTime = 3.0f;
+  constexpr float kBombMaxFlightTime = 3.0f;
+  constexpr float kThorMaxFlightTime = 3.0f;
   // Thors pass through walls, which is the entire reason to spend one: a target we cannot otherwise
   // reach. Rare in real play (150 uses against 46,000 bullets), used at a median 25 tiles.
   constexpr float kThorMaxRange = 30.0f;
@@ -549,8 +564,20 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
                             .InvertChild<InputQueryNode>(InputAction::Bomb)  // Never both in one tick.
                             .InvertChild<InputQueryNode>(InputAction::Thor)
                             .InvertChild<DistanceThresholdNode>("target_position", kBulletMaxRange)
-                            .Selector()  // Energy discipline, waived while committing to a kill.
+                            // Energy discipline, waived while committing to a kill and waived again
+                            // while outnumbered.
+                            //
+                            // The second waiver is the fix for the largest measured gap against
+                            // human play. Down two or more heads, humans fire at 2.9 shots/sec -
+                            // slightly *more* than when even - while this zone's bots fell to 1.51,
+                            // a 38% collapse at the exact moment volume of fire is the only thing
+                            // keeping three attackers honest. The cause was this gate: being
+                            // outnumbered drops us into Recover, Recover means low energy, and low
+                            // energy silenced the bullets. Saving energy while three people shoot at
+                            // you saves it for nobody.
+                            .Selector()
                                 .Child<BlackboardSetQueryNode>("phase_press")
+                                .InvertChild<ScalarThresholdNode<float>>("local_advantage", 0.0f)
                                 .Child<PlayerEnergyPercentThresholdNode>(kBulletEnergyFloor)
                                 .End()
                             .Child<ShotClearanceNode>(WeaponType::Bullet, "bullet_predicted", kBulletHitTolerance,
