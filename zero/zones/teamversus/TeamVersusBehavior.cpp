@@ -150,6 +150,20 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
   // blast catches us, and past the maximum a two-and-a-half second flight is pure hope.
   constexpr float kBombMinRange = 14.0f;
   constexpr float kBombMaxRange = 40.0f;
+  // A long bomb is a volley, and a volley is thrown by accelerating into it - so carrying real speed
+  // is a precondition of the shot rather than a bonus. Past kBombMinSpeedRange the bot must be doing
+  // at least half its top speed (about 10 tiles/sec of a 20.3 ceiling) or it holds the bomb.
+  //
+  // This sits on top of the flight-time cap rather than replacing it, because the two catch different
+  // things: the cap is satisfied by a slow shot at a near target, while this refuses the throw that
+  // is slow *and* long regardless of how the geometry works out. It is also the one gate that reads
+  // our own commitment rather than the target's - and a bomb costs 300 of a 1700 tank, so holding one
+  // for a second until the ship is moving is nearly free.
+  //
+  // Under the range threshold nothing is required: at 20 tiles the bomb's own 10 tiles/sec covers the
+  // distance in two seconds without any help from us.
+  constexpr float kBombMinSpeedFraction = 0.5f;
+  constexpr float kBombMinSpeedRange = 20.0f;
   // Bullets need a real hit, so the tolerance around the target hull is tight. Bombs deliver blast
   // damage on a near miss and are used as area denial, so theirs is deliberately loose.
   constexpr float kBulletHitTolerance = 1.6f;
@@ -575,7 +589,8 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
                             .Child<PlayerEnergyPercentThresholdNode>(kBombEnergyFloor)
                             .Child<DistanceThresholdNode>("target_position", kBombMinRange)
                             .InvertChild<DistanceThresholdNode>("target_position", kBombMaxRange)
-                            .Child<ShotClearanceNode>(WeaponType::Bomb, "bomb_predicted", kBombHitTolerance, kBombMaxFlightTime)
+                            .Child<ShotClearanceNode>(WeaponType::Bomb, "bomb_predicted", kBombHitTolerance,
+                                                      kBombMaxFlightTime, kBombMinSpeedFraction, kBombMinSpeedRange)
                             .Child<InputActionNode>(InputAction::Bomb)
                             .End()
 

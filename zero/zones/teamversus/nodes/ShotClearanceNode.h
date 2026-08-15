@@ -57,11 +57,13 @@ namespace teamversus {
 // that goes quiet in front of an enemy loses fights it would otherwise win.
 struct ShotClearanceNode : public behavior::BehaviorNode {
   ShotClearanceNode(WeaponType weapon_type, const char* predicted_key, float hit_radius_multiplier,
-                    float max_flight_time)
+                    float max_flight_time, float min_speed_fraction = 0.0f, float min_speed_range = 0.0f)
       : weapon_type(weapon_type),
         predicted_key(predicted_key),
         hit_radius_multiplier(hit_radius_multiplier),
-        max_flight_time(max_flight_time) {}
+        max_flight_time(max_flight_time),
+        min_speed_fraction(min_speed_fraction),
+        min_speed_range(min_speed_range) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -74,15 +76,50 @@ struct ShotClearanceNode : public behavior::BehaviorNode {
     auto& game = *ctx.bot->game;
 
     float weapon_speed = behavior::GetWeaponSpeed(game, *self, weapon_type);
+
+    // Firing a bomb shoves the ship backwards, and ShipController applies that recoil to our velocity
+    // *before* it derives the projectile's velocity - the comment at the assignment says so
+    // explicitly. So the bomb does not leave at our current velocity plus the muzzle speed; it leaves
+    // at our current velocity plus the muzzle speed *less the recoil*, which at BombThrust 400 is 2.5
+    // tiles/sec of the 12.5 the muzzle nominally provides.
+    //
+    // That is a fifth of the bomb's speed, and every flight time computed from it was short by the
+    // same fifth. The error is worst exactly where it hurts: standing still the whole ground speed is
+    // muzzle speed, so the check believed a bomb crossed the ground at 12.5 when it really managed
+    // 10.0, and cleared shots at ranges the bomb was never going to cover in time.
+    //
+    // Thors are exempt - their fire path applies no recoil at all - which is why this is keyed on the
+    // weapon rather than folded into GetWeaponSpeed.
+    if (weapon_type == WeaponType::Bomb || weapon_type == WeaponType::ProximityBomb) {
+      weapon_speed -= game.connection.settings.ShipSettings[self->ship].BombThrust / 100.0f * 10.0f / 16.0f;
+      if (weapon_speed < 0.0f) weapon_speed = 0.0f;
+    }
+
     Vector2f shot_velocity = self->velocity + self->GetHeading() * weapon_speed;
 
     if (shot_velocity.LengthSq() <= 0.0f) return behavior::ExecuteResult::Failure;
 
     Vector2f shot_direction = Normalize(shot_velocity);
 
+    float ship_max_speed = game.connection.settings.ShipSettings[self->ship].MaximumSpeed / 16.0f / 10.0f;
+    float range = predicted.Distance(self->position);
+
+    // --- are we moving fast enough to throw this that far? -------------------------------------
+    // A hard floor on our own speed, on top of the flight-time cap below. The two are not redundant:
+    // the flight-time cap can be satisfied by a slow shot at a near target, and a bomb thrown from a
+    // near-standstill at anything far is a bomb the target strolls away from. Long bombs are volleys,
+    // and the way a volley is thrown is to accelerate into it, fire, and reverse out - so the speed
+    // is a precondition of the shot, not a bonus.
+    //
+    // Deliberately our *speed*, not the component along the shot: this is the "am I committed to
+    // this throw" question, and the flight-time cap below already prices direction correctly (it
+    // divides by the shot's actual ground speed, which is what our motion adds to or subtracts from).
+    if (min_speed_fraction > 0.0f && range > min_speed_range) {
+      if (self->velocity.Length() < ship_max_speed * min_speed_fraction) return behavior::ExecuteResult::Failure;
+    }
+
     // --- does the trajectory actually cross the target? ----------------------------------------
     float ship_radius = game.connection.settings.ShipSettings[self->ship].GetRadius();
-    float range = predicted.Distance(self->position);
     float half_extent = ship_radius * hit_radius_multiplier + range * kOrientationQuantizationTangent;
 
     Rectangle target_bounds(predicted - Vector2f(half_extent, half_extent),
@@ -118,7 +155,6 @@ struct ShotClearanceNode : public behavior::BehaviorNode {
     // time is a far weaker shot against them. Scale the window down with their speed rather than
     // treating every target as equally hard to lead.
     float target_speed = ctx.blackboard.ValueOr<float>("target_speed", 0.0f);
-    float ship_max_speed = game.connection.settings.ShipSettings[self->ship].MaximumSpeed / 16.0f / 10.0f;
 
     float mobility = ship_max_speed > 0.0f ? target_speed / ship_max_speed : 0.0f;
     if (mobility > 1.0f) mobility = 1.0f;
@@ -256,6 +292,12 @@ struct ShotClearanceNode : public behavior::BehaviorNode {
   // heavy penalty here is really just a lower cap wearing a disguise - and the corpus says humans
   // take those shots.
   float mobility_penalty = 0.25f;
+
+  // Minimum fraction of the ship's top speed we must be carrying to take this shot at all, applied
+  // only past min_speed_range. Zero disables it, which is the right setting for bullets: a bullet is
+  // cheap, and the flight-time cap on its own already refuses the slow ones.
+  float min_speed_fraction = 0.0f;
+  float min_speed_range = 0.0f;
 
   // Blast tolerances, as a fraction of the bomb's maximum damage (750 here, 44% of a full tank).
   //
