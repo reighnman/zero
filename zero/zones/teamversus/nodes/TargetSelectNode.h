@@ -117,6 +117,17 @@ struct TargetSelectNode : public behavior::BehaviorNode {
       float proximity_distance = distance > proximity_scale ? proximity_scale : distance;
       score += (1.0f - proximity_distance / proximity_scale) * weight_proximity;
 
+      // --- finishable --------------------------------------------------------------------------
+      // Close *and* weak, which is a different thing from the sum of close and weak. The other terms
+      // are all about who would be worth killing over the next several seconds; this one is about
+      // who can be killed now. It is deliberately worth more than any of them, because the whole
+      // scoring scheme otherwise treats an enemy who is one hit from death and sitting in our lap as
+      // merely a good-ish candidate, and lets a healthier but more isolated target further away
+      // outscore them.
+      if (distance <= finish_range && energy_percent <= finish_energy) {
+        score += weight_finish;
+      }
+
       // --- stickiness --------------------------------------------------------------------------
       if (enemy->id == previous_id) {
         score += weight_sticky;
@@ -176,6 +187,14 @@ struct TargetSelectNode : public behavior::BehaviorNode {
   // Isolation past this is not more meaningful than isolation at this, so saturate rather than
   // letting one enemy who wandered across the map dominate the score forever.
   float isolation_cap = 60.0f;
+
+  // An enemy inside this range and below this energy is a kill available right now rather than a
+  // candidate for later. Range matches EngagementPhaseNode's finish range so target selection and
+  // posture agree about what "finishable" means.
+  float finish_range = 18.0f;
+  float finish_energy = 0.35f;
+
+  float weight_finish = 5.0f;
 
   float weight_isolation = 3.0f;
   float weight_weakness = 3.5f;

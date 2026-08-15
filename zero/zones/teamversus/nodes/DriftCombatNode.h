@@ -120,10 +120,17 @@ struct DriftCombatNode : public behavior::BehaviorNode {
 
       if (press_radius >= 0.5f) {
         Vector2f press_radial = press_offset * (1.0f / press_radius);
-        float error = press_radius - standoff;
 
-        if (fabsf(error) > press_dead_band) {
-          steering.force += press_radial * (error > 0.0f ? -max_speed : max_speed);
+        // Close, or hold - never back out. The standoff is a distance to *reach*, not one to
+        // maintain, and treating it as a set point had the bot reversing away from a target it was
+        // already on top of in order to re-establish ten tiles of separation. Standing next to
+        // something helpless and thrusting backwards is the most expensive possible reading of
+        // "commit to the kill".
+        //
+        // Inside the standoff the force simply drops to zero, which leaves the ship coasting on the
+        // momentum it arrived with while the nose keeps tracking. That is what a firing pass is.
+        if (press_radius - standoff > press_dead_band) {
+          steering.force += press_radial * -max_speed;
         }
       }
 

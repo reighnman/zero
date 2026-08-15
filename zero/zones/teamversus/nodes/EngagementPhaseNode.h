@@ -134,6 +134,11 @@ struct EngagementPhaseNode : public behavior::BehaviorNode {
   // ground under fire. Kills in the corpus were set up from a median 32 tiles at T-3s.
   float press_max_distance = 36.0f;
 
+  // Inside this, being at no head-count disadvantage is by itself reason enough to finish rather than
+  // disengage. A little above where kills actually land (median 11 tiles) so the commitment starts
+  // fractionally before the killing range rather than at it.
+  float press_finish_range = 18.0f;
+
   // Our own isolation that makes rejoining the team the priority. Sits above the median victim's
   // 41 tiles, because reacting exactly at the median would have us running home constantly.
   float regroup_support_distance = 46.0f;
@@ -164,10 +169,21 @@ struct EngagementPhaseNode : public behavior::BehaviorNode {
 
   EngagementPhase Decide(float self_energy_percent, float advantage, float support_distance, float team_alive,
                          float target_energy_percent, float target_distance, float target_isolation) const {
-    // Being alone is not "isolation" - there is nobody left to regroup with, and the rest of the
-    // logic still applies. Without this, the last player alive would spend the endgame running
-    // toward teammates who do not exist.
+    // How many of our side are still in the match at all - not how many are nearby, which is what
+    // `advantage` measures. The distinction decides the endgame, and it is the reason this node is
+    // handed both numbers.
+    //
+    // While teammates remain, refusing a bad fight is free: someone else is still applying pressure
+    // somewhere, and the round is not decided by whether we personally take this one. Once we are the
+    // last one alive that stops being true. There is no longer a fight happening anywhere else, no
+    // support arriving, and nobody to regroup toward - so a 1v1 or even a 1v3 is not a fight we are
+    // choosing, it is the only fight there is, and declining it just loses the round more slowly
+    // while the opposing team recharges at leisure.
+    //
+    // So `last_alive` unlocks the two rules below that would otherwise hold us back: the rout check
+    // that sends us to Recover when down two bodies, and the head-count floor on pressing.
     bool has_team = team_alive > 0.0f;
+    bool last_alive = !has_team;
 
     if (has_team && support_distance > regroup_support_distance && advantage <= 0.0f) {
       return EngagementPhase::Regroup;
@@ -176,7 +192,7 @@ struct EngagementPhaseNode : public behavior::BehaviorNode {
     // A two-man local disadvantage is a rout at every range measured. Leave regardless of energy -
     // unless there is no team left, in which case there is nothing to preserve ourselves for and
     // backing away from a 1v3 forever just loses it slowly.
-    if (advantage <= -2.0f && has_team) return EngagementPhase::Recover;
+    if (advantage <= -2.0f && !last_alive) return EngagementPhase::Recover;
 
     // The relative read, which is what was missing and why these bots never finished anyone off.
     // Every press condition used to be an *absolute* threshold - our energy above a half, theirs
@@ -191,16 +207,45 @@ struct EngagementPhaseNode : public behavior::BehaviorNode {
     // pressing is correct and waiting is not.
     bool stronger = self_energy_percent >= target_energy_percent + press_energy_margin;
 
-    bool opening = stronger || target_energy_percent <= press_target_energy ||
+    // Already on top of them and not losing the head-count. This is the opening that was missing, and
+    // the reason two bots could stand next to a helpless enemy and decline to kill it.
+    //
+    // The arithmetic of `local_advantage` is the trap. It counts friends minus enemies *excluding
+    // ourselves*, so the true head-count is one better than the number: a 1v1 reads as -1, two of us
+    // against one of them reads as 0, and `advantage >= 1` - the numbers opening above - actually
+    // means three against one. Two bots on a lone target therefore satisfied none of the openings and
+    // fell through to Poke, whose whole job is to back off to standoff range. They were not failing
+    // to notice a kill; they were correctly executing "hold 23 tiles" while standing on top of one.
+    //
+    // At close range with at least an even count there is nothing left to set up. The exchange data
+    // puts the ratio at 2.33 at this advantage, so disengaging to poke from further out is strictly
+    // worse than finishing, whatever the energy estimate happens to say - and that estimate is the
+    // weakest input here, since enemy energy is never broadcast in this arena.
+    bool close_opening = advantage >= 0.0f && target_distance <= press_finish_range;
+
+    bool opening = stronger || close_opening || target_energy_percent <= press_target_energy ||
                    target_isolation >= press_target_isolation || advantage >= 1.0f;
 
-    // Never push into a losing head-count. The exchange data is unambiguous that being down bodies
-    // costs more than any range advantage can return, so a lone bot diving three of them is simply
-    // feeding - the one exception being that our team is already gone, where the alternative is
-    // losing anyway.
-    bool numbers_ok = advantage >= 0.0f || !has_team;
+    // Never push into a *losing* head-count - but read the number correctly, because it does not
+    // count us. `local_advantage` is friends minus enemies excluding self, so the true count is one
+    // better than it reads:
+    //
+    //     computed -2  = 1v2 or worse   - a rout, already sent to Recover above
+    //     computed -1  = 1v1            - even, and won outright if we hold the energy
+    //     computed  0  = 2v1            - a body up
+    //     computed +1  = 3v1            - decisive
+    //
+    // This gate previously demanded 0 or better, which quietly excluded every 1v1 in the match. A
+    // duel is not a disadvantage; whoever has more energy wins it, which is what `stronger` is for.
+    // So the bar is simply "not already a rout", and the energy and proximity conditions decide
+    // whether there is anything worth pressing. The exception for having no team left stands: down
+    // two bodies with nobody to regroup toward, backing away only loses more slowly.
+    bool numbers_ok = advantage >= -1.0f || last_alive;
 
-    bool can_afford = stronger || self_energy_percent >= press_min_energy;
+    // Being already close is its own affordability argument: the energy a press normally has to buy
+    // is the energy spent crossing open ground under fire, and at this range that cost has already
+    // been paid. Backing out and coming back costs more than finishing.
+    bool can_afford = stronger || close_opening || self_energy_percent >= press_min_energy;
 
     if (opening && can_afford && numbers_ok && target_distance <= press_max_distance) {
       return EngagementPhase::Press;
