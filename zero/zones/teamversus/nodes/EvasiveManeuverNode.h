@@ -49,7 +49,10 @@ struct EvasiveManeuverNode : public behavior::BehaviorNode {
     if (!self || self->ship >= 8) return behavior::ExecuteResult::Failure;
 
     float threat_damage = ctx.blackboard.ValueOr<float>("threat_damage", 0.0f);
-    float threat_unavoidable = ctx.blackboard.ValueOr<float>("threat_unavoidable_damage", 0.0f);
+    // The optimistic figure, and the right one here: this node is the thing that performs the turn
+    // the estimate assumes, so it is entitled to price the break at what the break actually buys.
+    // The repel runs on the pessimistic companion value instead.
+    float avoidable = ctx.blackboard.ValueOr<float>("threat_avoidable_damage", 0.0f);
     float threat_count = ctx.blackboard.ValueOr<float>("threat_count", 0.0f);
     Vector2f escape_direction = ctx.blackboard.ValueOr<Vector2f>("threat_escape", Vector2f(0, 0));
 
@@ -65,10 +68,6 @@ struct EvasiveManeuverNode : public behavior::BehaviorNode {
 
     float max_energy = (float)game.ship_controller.ship.energy;
 
-    // How much of this we could actually make disappear by moving. ThreatAssessmentNode already
-    // computes what still lands after the best dodge available in the time remaining, so the
-    // difference is the part that is genuinely on offer.
-    float avoidable = threat_damage - threat_unavoidable;
     if (avoidable < 0.0f) avoidable = 0.0f;
 
     // Commit the tick to a break for two different reasons, and the second one is the important one.

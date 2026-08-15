@@ -19,16 +19,49 @@ inline constexpr float kNoThreatTime = 999.0f;
 // treating as a hit. This widens the hull a little for that intersection test only.
 inline constexpr float kBulletHitboxSlop = 1.6f;
 
+// How close a bomb has to pass before it goes off on us, in tiles, mirroring WeaponManager exactly.
+//
+// This is a different and much smaller number than the blast radius, and confusing the two is the
+// single biggest error a threat model can make here. The blast reaches ten tiles; the fuse trips at
+// under four. A bomb whose closest approach to us is six tiles does not do a reduced six-tile-worth
+// of damage - it does *nothing at all*, because it never detonates. It sails past and goes off
+// somewhere else entirely.
+//
+// A plain (non-proximity) bomb has no sensor and only detonates on contact, which the same formula
+// gives as a quarter of a tile.
+inline float GetWeaponFuseRadius(Game& game, const Weapon& weapon) {
+  bool is_prox = weapon.data.type == WeaponType::ProximityBomb || weapon.data.type == WeaponType::Thor;
+
+  float radius_pixels = 18.0f;
+
+  if (is_prox) {
+    float prox = (float)game.connection.settings.ProximityDistance + (float)weapon.data.level;
+    // Thors carry a wider sensor than their level alone implies.
+    if (weapon.data.type == WeaponType::Thor) prox += 3.0f;
+
+    radius_pixels = prox * 18.0f;
+  }
+
+  radius_pixels -= 14.0f;
+  if (radius_pixels < 0.0f) radius_pixels = 0.0f;
+
+  return radius_pixels / 16.0f;
+}
+
 // Everything the defensive half of the tree needs to know about what is currently flying at us.
 struct ThreatReport {
   // Total damage we expect to actually take if we hold our current course, in raw energy.
   float damage = 0.0f;
-  // Damage still landing after the best dodge physically available in the time remaining. This is
-  // the number a defensive item decision is actually about, and it is not a subset of the above
-  // selected by some cutoff - it is the same threats re-evaluated at the distance we could open up
-  // before they arrive. A bullet we can step out of contributes nothing here however lethal it looks
-  // on the current course; a bomb we can only half escape contributes its reduced blast.
+  // Damage still landing after the dodge we get *for free* - thrusting along the heading we already
+  // hold, with no rotation and no aim given up. Deliberately the pessimistic of the two estimates,
+  // because this is what the repel and portal decisions run on and a safety margin computed from a
+  // best case is not a margin. The optimistic version below assumes a turn that the movement system
+  // only actually performs sometimes, and never while pressing.
   float unavoidable_damage = 0.0f;
+  // Damage that a full committed break - turn onto the escape axis, then thrust - would remove. This
+  // is the number for deciding whether such a break is worth its cost in aim, and it is the node
+  // that would perform the turn that reads it.
+  float avoidable_damage = 0.0f;
   // Unit vector pointing away from the threat axis - the direction that most increases our miss
   // distance. Zero when there is no threat.
   Vector2f escape_direction;
@@ -114,44 +147,63 @@ inline ThreatReport AssessThreats(behavior::ExecuteContext& ctx, Player* self, f
       approach_distance = closest_point.Distance(self->position);
     }
 
-    // How much further from the shot we could be by the time it gets here, if we spent the whole
-    // interval doing nothing but getting out of the way. Zero for a mine, which is not travelling
-    // toward us and whose fuse trips on contact rather than after a flight.
-    float dodge_distance = 0.0f;
+    // How much further from the shot we could be by the time it gets here. Two answers, because the
+    // safety decisions and the movement decision are asking different questions - see
+    // GetDodgeDistance. Zero for a mine, which is not travelling toward us and whose fuse trips on
+    // contact rather than after a flight.
+    float free_dodge = 0.0f;
+    float committed_dodge = 0.0f;
 
     if (!is_mine && relative_speed >= 0.01f) {
-      dodge_distance = GetDodgeDistance(game, *self, relative_velocity * (1.0f / relative_speed), approach_time);
-    }
+      Vector2f threat_direction = relative_velocity * (1.0f / relative_speed);
 
-    float dodged_distance = approach_distance + dodge_distance;
+      free_dodge = GetDodgeDistance(game, *self, threat_direction, approach_time, false);
+      committed_dodge = GetDodgeDistance(game, *self, threat_direction, approach_time, true);
+    }
 
     float damage = 0.0f;
     float unavoidable = 0.0f;
+    float after_break = 0.0f;
 
     if (is_bomb) {
-      // Only bombs need a detonation model at all: the proximity fuse trips before contact, so the
-      // blast centre sits at roughly the closest approach point rather than on our hull. That means
-      // closest approach is also the distance the falloff should be evaluated at.
-      float blast_radius = GetBlastRadius(game, weapon.data.level);
+      // A bomb goes off at its closest approach to whoever tripped its sensor - WeaponManager holds
+      // it until the separation stops shrinking, then detonates and rolls the position back - so
+      // closest approach is both whether it detonates and the distance the falloff is evaluated at.
+      //
+      // The gate is the *fuse* radius, not the blast radius, and that distinction is the whole point
+      // of this block. The blast reaches ten tiles but the sensor trips at under four, so a bomb
+      // passing six tiles away is not a reduced hit, it is no hit: it never goes off on us at all.
+      // Testing against the blast radius instead credited every bomb that sailed past with three to
+      // five hundred phantom damage, which inflated every threat total downstream and is exactly the
+      // sort of error that produces defensive decisions nobody can explain afterwards.
+      //
+      // The same cutoff makes dodging a bomb all-or-nothing rather than a linear reduction. Get
+      // outside the sensor and it does not detonate; that is worth far more than shading the falloff
+      // and is why a bomb aimed dead-on is so much more dangerous than one that merely comes near.
+      float fuse_radius = GetWeaponFuseRadius(game, weapon) + ship_radius;
 
-      // Outside the blast entirely - genuinely harmless, so skip it rather than dodging a bomb that
-      // was going to sail past doing nothing.
-      if (approach_distance > blast_radius) continue;
+      if (approach_distance > fuse_radius) continue;
 
       float max_damage = (float)GetEstimatedWeaponDamage(weapon, game.connection);
+      u16 level = weapon.data.level;
 
-      damage = max_damage * GetBlastDamageFraction(game, weapon.data.level, approach_distance);
-      // A blast cannot be stepped out of the way of, only stepped further from - and since the
-      // falloff is linear, every tile of dodge is a real reduction rather than an all-or-nothing.
-      unavoidable = max_damage * GetBlastDamageFraction(game, weapon.data.level, dodged_distance);
+      damage = max_damage * GetBlastDamageFraction(game, level, approach_distance);
+
+      float free_distance = approach_distance + free_dodge;
+      float break_distance = approach_distance + committed_dodge;
+
+      unavoidable = free_distance > fuse_radius ? 0.0f : max_damage * GetBlastDamageFraction(game, level, free_distance);
+      after_break = break_distance > fuse_radius ? 0.0f : max_damage * GetBlastDamageFraction(game, level, break_distance);
     } else {
       // Bullets have no fuse, so they only matter if the shot actually crosses our hull.
       float hit_extent = ship_radius * kBulletHitboxSlop;
       if (approach_distance > hit_extent) continue;
 
       damage = (float)GetEstimatedWeaponDamage(weapon, game.connection);
+
       // All or nothing: clear the hull and it does nothing at all.
-      unavoidable = dodged_distance > hit_extent ? 0.0f : damage;
+      unavoidable = (approach_distance + free_dodge) > hit_extent ? 0.0f : damage;
+      after_break = (approach_distance + committed_dodge) > hit_extent ? 0.0f : damage;
     }
 
     if (damage <= 0.0f) continue;
@@ -177,6 +229,7 @@ inline ThreatReport AssessThreats(behavior::ExecuteContext& ctx, Player* self, f
     weighted_escape += escape * damage;
     report.damage += damage;
     report.unavoidable_damage += unavoidable;
+    report.avoidable_damage += damage - after_break;
 
     if (approach_time < soonest_impact) {
       soonest_impact = approach_time;
@@ -213,6 +266,7 @@ struct ThreatAssessmentNode : public behavior::BehaviorNode {
 
     ctx.blackboard.Set<float>("threat_damage", report.damage);
     ctx.blackboard.Set<float>("threat_unavoidable_damage", report.unavoidable_damage);
+    ctx.blackboard.Set<float>("threat_avoidable_damage", report.avoidable_damage);
     ctx.blackboard.Set<float>("threat_count", (float)report.count);
     ctx.blackboard.Set<float>("threat_time", report.time_to_impact);
     ctx.blackboard.Set<Vector2f>("threat_escape", report.escape_direction);

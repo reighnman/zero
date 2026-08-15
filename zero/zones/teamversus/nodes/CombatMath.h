@@ -176,7 +176,20 @@ inline float GetProximityRadius(Game& game, u16 level) {
 // Both use our own upgraded thrust and rotation stats, which - unlike an enemy's - we can read
 // directly. Displacement is the usual (1/2)at^2; the shot's own travel is already accounted for by
 // the caller, which measures closest approach in the relative frame.
-inline float GetDodgeDistance(Game& game, const Player& self, const Vector2f& threat_direction, float seconds) {
+// `allow_rotation` picks which of the two answers you get, and the choice is not cosmetic.
+//
+// With it, this is the best case: turn onto the escape axis, then thrust with everything. That is
+// the right number for the node that is actually going to perform the turn, when it is deciding
+// whether a break is worth the aim it costs.
+//
+// Without it, only the component of thrust already lying across the shot counts - what we get for
+// free, without giving up anything. That is the right number for a *safety* decision, because using
+// a best case to conclude "I do not need to spend a repel" assumes a dodge that the movement system
+// may well not perform: the evasive node only commits above a damage threshold, and during a press
+// it is suppressed entirely. Optimism in a safety margin is how a bot eats a bomb it could have
+// repelled and only then decides it is in trouble.
+inline float GetDodgeDistance(Game& game, const Player& self, const Vector2f& threat_direction, float seconds,
+                              bool allow_rotation = true) {
   if (seconds <= 0.0f) return 0.0f;
 
   auto& ship = game.ship_controller.ship;
@@ -199,7 +212,7 @@ inline float GetDodgeDistance(Game& game, const Player& self, const Vector2f& th
 
   float best = immediate;
 
-  if (rotation_rate > 0.0f) {
+  if (allow_rotation && rotation_rate > 0.0f) {
     float turn_seconds = acosf(alignment) / rotation_rate;
 
     if (seconds > turn_seconds) {
