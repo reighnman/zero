@@ -159,7 +159,19 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   // branch exists because a silent retreat produced a death spiral in rec17, and volume of fire is
   // the one thing the skill split separates on. So this is a floor, not a throttle: go quiet only
   // once each 20-energy bullet is a real fraction of the tank we are retreating to refill.
-  constexpr float kRetreatFireMinEnergyPercent = kFleePanicEnergyPercent;
+  //
+  // WHERE THE NUMBER COMES FROM. Self energy% at the moment of firing a bullet, measured three ways:
+  //
+  //   pvp human corpus (46080 shots)   p10 0.6   median 0.9
+  //   rec38 bots        (2342 shots)   p10 0.4   median 0.8
+  //   rec40 bots        (1614 shots)   p10 0.3   median 0.6
+  //
+  // Humans essentially never fire below 60%. The bots do, and rec40 got markedly worse at it. The
+  // floor must be at least the main aim-and-shoot block's own gate (0.35) - a retreat is when energy
+  // matters most, so it makes no sense for the retreat to fire in a band where the fight would not -
+  // and there is a wide gap up to human practice, so a modest margin above that gate costs little
+  // volume. This is the first constant to move if the bots start going too quiet while chased.
+  constexpr float kRetreatFireMinEnergyPercent = 0.40f;
 
   // Cruise at less than full speed unless committing to a kill or running. A ship already at
   // maximum has no acceleration left to dodge with and carries momentum it cannot cheaply reverse.

@@ -441,10 +441,20 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // and the skill split says volume of fire is the one thing separating good players from bad
   // (24.0 vs 19.2 shots/min). So this is a floor, not a throttle: keep shooting while there is a
   // buffer to spend, go quiet only once low enough that each 20-energy bullet is a real fraction of
-  // the tank we are retreating to refill. Set at the panic threshold, where FleeNode gives up on the
-  // leash and purely opens distance - at that point the retreat is the only thing keeping us alive
-  // and it should not be paying for bullets.
-  constexpr float kRetreatFireMinEnergyPercent = kFleePanicEnergyPercent;
+  // the tank we are retreating to refill.
+  //
+  // WHERE THE NUMBER COMES FROM. Self energy% at the moment of firing a bullet, measured three ways:
+  //
+  //   pvp human corpus (46080 shots)   p10 0.6   median 0.9
+  //   rec38 bots        (2342 shots)   p10 0.4   median 0.8
+  //   rec40 bots        (1614 shots)   p10 0.3   median 0.6
+  //
+  // Humans essentially never fire below 60%. The bots do, and rec40 got markedly worse at it. The
+  // floor must be at least the main aim-and-shoot block's own gate (0.35) - a retreat is when energy
+  // matters most, so it makes no sense for the retreat to fire in a band where the fight would not -
+  // and there is a wide gap up to human practice, so a modest margin above that gate costs little
+  // volume. This is the first constant to move if the bots start going too quiet while chased.
+  constexpr float kRetreatFireMinEnergyPercent = 0.40f;
 
   // Once within this distance of the target, stop closing further and circle instead - close
   // enough that they'll eventually fail to dodge a lobbed shot and we can dive in, far enough to
