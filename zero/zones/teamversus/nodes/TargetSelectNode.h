@@ -88,7 +88,6 @@ struct TargetSelectNode : public behavior::BehaviorNode {
       if (region_registry && !region_registry->IsConnected(self->position, enemy->position)) continue;
 
       float distance = enemy->position.Distance(self->position);
-      if (distance > max_range) continue;
 
       float score = 0.0f;
 
@@ -112,7 +111,11 @@ struct TargetSelectNode : public behavior::BehaviorNode {
       }
 
       // --- proximity ---------------------------------------------------------------------------
-      score += (1.0f - distance / max_range) * weight_proximity;
+      // Saturating rather than filtering. Past the scale distance every candidate is simply "far",
+      // and letting the term go negative would make a distant enemy score worse than no enemy at
+      // all - which is how this node used to hand the tree an empty target and strand it.
+      float proximity_distance = distance > proximity_scale ? proximity_scale : distance;
+      score += (1.0f - proximity_distance / proximity_scale) * weight_proximity;
 
       // --- stickiness --------------------------------------------------------------------------
       if (enemy->id == previous_id) {
@@ -152,9 +155,18 @@ struct TargetSelectNode : public behavior::BehaviorNode {
 
   const char* output_key = nullptr;
 
-  // Beyond this there is no meaningful engagement to be had - the corpus's own bullet hit rate is
-  // already down at the false-attribution noise floor well before here.
-  float max_range = 70.0f;
+  // Distance at which the proximity term bottoms out. This is a *scale*, not a cutoff, and the
+  // difference matters: there is deliberately no maximum range on target selection at all.
+  //
+  // It used to be a cutoff, and that was a deadlock. Teams start a knockout match on opposite sides
+  // of the map, well outside any sane engagement range, so every bot selected no target, took the
+  // tree's no-target branch, and came to a dead stop - which meant nothing ever closed the distance
+  // and nothing ever entered range. Both teams sat still for the entire round.
+  //
+  // "Who should I be fighting" and "can I hit them from here" are separate questions. This node
+  // answers the first for any enemy that exists and is reachable; the movement branch paths toward
+  // them when they are too far or behind terrain, and the firing gates answer the second.
+  float proximity_scale = 70.0f;
   // Isolation past this is not more meaningful than isolation at this, so saturate rather than
   // letting one enemy who wandered across the map dominate the score forever.
   float isolation_cap = 60.0f;

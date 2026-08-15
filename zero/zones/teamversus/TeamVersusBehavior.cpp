@@ -110,8 +110,14 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
   constexpr float kMinTeamSpacing = 11.0f;
   // A little above the measured median spacing of 26 tiles.
   constexpr float kMaxTeamSpacing = 32.0f;
-  // Far enough out that walking home is genuinely better than fighting where we are.
-  constexpr float kRegroupDistance = 46.0f;
+  // (The distance at which being cut off makes walking home the priority lives on
+  // EngagementPhaseNode as regroup_support_distance, since posture owns that decision.)
+
+  // --- approach -----------------------------------------------------------------------------
+  // Past this we path toward the target instead of steering at it. Comfortably outside the widest
+  // standoff posture (Recover, 42 tiles) plus the pump's swing, so the orbit is never interrupted by
+  // the approach branch trying to reclaim it at the outer edge of a normal in-out cycle.
+  constexpr float kApproachRange = 50.0f;
 
   // --- terrain ------------------------------------------------------------------------------
   // Small on purpose: this should fire when a wall is actually in the way, not merely nearby.
@@ -135,6 +141,11 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
   // damage on a near miss and are used as area denial, so theirs is deliberately loose.
   constexpr float kBulletHitTolerance = 1.6f;
   constexpr float kBombHitTolerance = 5.0f;
+  // Target selection has no range limit any more - it picks who we should be fighting, not who we
+  // can hit - so the firing block carries its own. A bullet expires at 68 tiles (BulletAliveTime 550
+  // against a 12.5 tile/sec muzzle speed), and the corpus's own hit rate is at the noise floor well
+  // before that; this sits above the p75 human firing range so it costs no real volume.
+  constexpr float kBulletMaxRange = 45.0f;
   // Thors pass through walls, which is the entire reason to spend one: a target we cannot otherwise
   // reach. Rare in real play (150 uses against 46,000 bullets), used at a median 25 tiles.
   constexpr float kThorMaxRange = 30.0f;
@@ -321,15 +332,22 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
                 .End()
 
             // --- nobody to fight -----------------------------------------------------------
-            // Either everyone is dead, unreachable, or sitting in safe. Close on the team rather
-            // than idling apart, since whatever happens next will happen at a head-count advantage
-            // for whoever is together when it does.
+            // Since target selection has no range limit, reaching here means there is genuinely no
+            // enemy we know anything about - all dead, in safe, in an unreachable region, or never
+            // yet seen. Not "none in range": that used to land here too, and because the only thing
+            // this branch did was stop dead, both teams would sit motionless for the whole round
+            // waiting for someone else to close the distance.
+            //
+            // Close on the team rather than idling apart, since whatever happens next happens at a
+            // head-count advantage for whoever is together when it does. The gate is formation
+            // spacing rather than the regroup distance, because there is no fight to be given up by
+            // tightening up now.
             .Sequence()
                 .InvertChild<BlackboardSetQueryNode>("target")
                 .Selector(CompositeDecorator::Success)
                     .Sequence()
                         .Child<BlackboardSetQueryNode>("nearest_teammate_position")
-                        .Child<DistanceThresholdNode>("nearest_teammate_position", kRegroupDistance)
+                        .Child<DistanceThresholdNode>("nearest_teammate_position", kMaxTeamSpacing)
                         .Child<GoToNode>("nearest_teammate_position")
                         .Child<RenderPathNode>(Vector3f(0.0f, 1.0f, 0.5f))
                         .End()
@@ -344,15 +362,18 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
             .Parallel()
 
                 // ---- movement: a Selector, so exactly one node has primary authority --------
+                //
+                // Ordered as: survive, regroup, approach, then fight. The split that matters is
+                // between the two *pathed* branches and the two *steered* ones below them. Steering
+                // is a force toward where we want to be and knows nothing about the map; on a walled
+                // arena that is only usable once we are already in the same pocket as the target.
+                // Anything further than that has to be pathed, or the bot presses itself into
+                // whatever wall happens to lie between it and the enemy.
                 .Selector()
-                    // Terrain wins outright. Blending avoidance into a force that is actively
-                    // pushing into a corner only produces a smaller push into the corner.
-                    .Child<TerrainAvoidNode>(kWallDistance, kWallOpeningDistance, "target_position")
-
                     // Returns Success only when the incoming volley is actually lethal, in which
-                    // case it takes the tick. Otherwise it fails, having already blended in a
-                    // speed-changing nudge that keeps the nose on target - so the branches below
-                    // still run and the dodge comes for free.
+                    // case it takes the tick (and handles its own wall avoidance). Otherwise it
+                    // fails, having already blended in a speed-changing nudge that keeps the nose on
+                    // target - so the branches below still run and the dodge comes for free.
                     .Child<EvasiveManeuverNode>(kLethalFraction)
 
                     // Cut off from the team. Walk home; the firing block keeps working on the way.
@@ -363,12 +384,29 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
                         .Child<RenderPathNode>(Vector3f(1.0f, 0.5f, 0.0f))
                         .End()
 
-                    // Target is behind terrain. Path to them rather than orbiting a wall.
+                    // Approach. Either the target is too far to fight from here, or terrain is in
+                    // the way - and both are answered the same way, by pathing rather than steering.
+                    //
+                    // The line-of-sight test is what makes this self-limiting: it is a plain cast
+                    // from us to the target, so the moment the path brings them into view this
+                    // branch stops claiming the tick and the orbit below takes over. There is no
+                    // separate "stop approaching" rule to get wrong.
                     .Sequence()
-                        .InvertChild<VisibilityQueryNode>("target_position")
+                        .Selector()
+                            .Child<DistanceThresholdNode>("target_position", kApproachRange)
+                            .InvertChild<VisibilityQueryNode>("target_position")
+                            .End()
                         .Child<GoToNode>("target_position")
                         .Child<RenderPathNode>(Vector3f(0.0f, 0.5f, 1.0f))
                         .End()
+
+                    // From here down movement is a raw steering force, so terrain has to be handled
+                    // explicitly. This sits *below* the pathed branches on purpose: the pathfinder
+                    // already routes around walls, and an open-direction shove layered on top of it
+                    // fights the route it is following. Blending is no better - an avoidance force
+                    // added to a force pushing into a corner is just a smaller push into the corner
+                    // - so once terrain is genuinely in the way here, it wins the tick outright.
+                    .Child<TerrainAvoidNode>(kWallDistance, kWallOpeningDistance, "target_position")
 
                     // The normal case: orbit at the standoff posture asked for, pumping in and out.
                     .Child<DriftCombatNode>("aimshot", "target_position", "standoff_distance")
@@ -424,6 +462,7 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
                             .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
                             .InvertChild<InputQueryNode>(InputAction::Bomb)  // Never both in one tick.
                             .InvertChild<InputQueryNode>(InputAction::Thor)
+                            .InvertChild<DistanceThresholdNode>("target_position", kBulletMaxRange)
                             .Selector()  // Energy discipline, waived while committing to a kill.
                                 .Child<BlackboardSetQueryNode>("phase_press")
                                 .Child<PlayerEnergyPercentThresholdNode>(kBulletEnergyFloor)
