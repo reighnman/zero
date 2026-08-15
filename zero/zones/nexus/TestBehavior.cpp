@@ -860,6 +860,10 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                             .Child<InputActionNode>(InputAction::Mine)
                             .Child<TimerSetNode>("mine_timer", 500)
                             .End()
+                        .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kFleeWallLookaheadSeconds, "team_centroid") //Long flee horizon - a retreat commits to 30-55 tiles, so the cast has to reach that far or we pick a corridor that dead ends. Additive unless actually cornered, in which case it takes the Selector and the flee below is skipped so nothing pushes us back into the pocket.
+                            .Child<FleeNode>("nearest_aimshot", "flee_distance", 5.0f, kFleePanicEnergyPercent, "nearest_target_energy", "team_centroid", kFleeTeamBiasRadians) //The low-energy panic override has to be judged against whoever is chasing us. Pointing it at "target_energy" meant a bot fleeing a healthy enemy at 3 tiles could suppress its own panic because the distant focus target it happened to be shooting was weaker.
+                            .End()
                         .Sequence(CompositeDecorator::Success) // Lob a bomb at a chaser we are holding at range. Past kRetreatBombMinDistance a bullet is mostly spent energy while a bomb's blast radius still forces the chaser to steer - see the constant for the measured hit rates. Sits ahead of the bullet check below, which declines to fire in the same tick as a bomb, so this is the choice between the two.
                             .InvertChild<InputQueryNode>(InputAction::Mine) //Mine and bomb are the same key
                             .InvertChild<InputQueryNode>(InputAction::Bomb) //Defensive: nothing else in the retreat branch presses bomb now that the reverse-retreat block is gone, but the bullet check below keys off this to resolve the weapon choice

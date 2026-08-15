@@ -341,6 +341,10 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                     .Sequence()  //Keep distance while recharging
                         .InvertChild<TimerExpiredNode>("recharge_timer")
                         .Child<BlackboardEraseNode>("rushing") //We're breaking off, so we are no longer pressing. Without this "rushing" is only cleared inside the aim-and-shoot Parallel below, which this branch skips entirely.
+                        .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
+                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kFleeWallLookaheadSeconds) //No team centroid to bias toward in a duel, so the escape direction is chosen purely on openness. Long flee horizon for the same reason as the team trees.
+                            .Child<FleeNode>("nearest_aimshot", "flee_distance", 5.0f, kFleePanicEnergyPercent, "nearest_target_energy") //Distance scales with injury instead of being a fixed leash, and the panic threshold is raised - see FleeDistanceNode
+                            .End()
                         .Sequence(CompositeDecorator::Success) // Lob a bomb at a chaser we are holding at range. Past kRetreatBombMinDistance a bullet is mostly spent energy while a bomb's blast radius still forces the chaser to steer - see the constant for the measured hit rates. Sits ahead of the bullet check below, which declines to fire in the same tick as a bomb, so this is the choice between the two.
                             .Child<TimerExpiredNode>("match_startup")
                             .InvertChild<InputQueryNode>(InputAction::Mine) //Mine and bomb are the same key
