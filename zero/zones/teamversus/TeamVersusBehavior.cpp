@@ -101,9 +101,22 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
   // Radius the exchange-ratio table was measured at. Widening it would count teammates too far away
   // to affect the trade within the second the exchange is measured over.
   constexpr float kLocalRadius = 25.0f;
-  // How far out to look for incoming fire. Comfortably past the range a bullet covers during the
-  // time it takes us to react and turn.
-  constexpr float kThreatScanDistance = 22.0f;
+  // How far out to look for incoming fire. This is the earliest a defensive item can possibly be
+  // spent, because nothing outside it exists as far as the threat model is concerned - so it is the
+  // knob for "repelling too soon" rather than any of the damage thresholds.
+  //
+  // Shortening it is monotone safe: the decision at a given range does not change, the far
+  // evaluations are simply removed, so a repel can fire no earlier than this and never fires where
+  // it previously would not have.
+  //
+  // Sized from what a committed break can still accomplish once a shot is inside it. A bomb has to
+  // be pushed clear of its fuse (about 3.6 tiles plus our hull) or it does not go off at all, and at
+  // this range a bullet-speed threat gives roughly 1.3 seconds - enough for a nose-on ship to spend
+  // 0.4s turning and still cover about four and a half tiles. Any further out and the break wins
+  // easily, which is exactly the band where an item is being wasted on something we could have flown
+  // out of. It also brackets where the strong human actually repels, a median 13 tiles from the
+  // nearest enemy.
+  constexpr float kThreatScanDistance = 16.0f;
 
   // --- formation ----------------------------------------------------------------------------
   // Roughly the bomb blast radius, so teammates stop sharing every bomb aimed at either of them.
