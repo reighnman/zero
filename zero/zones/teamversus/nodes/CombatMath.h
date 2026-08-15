@@ -153,6 +153,67 @@ inline float GetProximityRadius(Game& game, u16 level) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Dodge capability
+// ---------------------------------------------------------------------------------------------
+
+// How far we can move *across* an incoming shot's path within `seconds`, in tiles.
+//
+// This is what turns "is there still time to dodge" from a guessed constant into something computed.
+// A fixed reaction horizon cannot answer it, because the answer depends on where our nose currently
+// points: thrust in this game acts only along the heading, so a ship already broadside to the shot
+// starts displacing immediately, while one pointed straight down the shot's path has to spend most
+// of the available time turning before any of its thrust does anything useful. Those two cases can
+// differ by a factor of several, and treating them the same is what makes a bot burn a repel on
+// something it could have simply flown out of.
+//
+// Two strategies are available and we get to take whichever is better:
+//
+//   - Thrust immediately along the current heading, forward or backward. Only the component of the
+//     heading that lies across the shot contributes, but it starts working on tick one.
+//   - Turn onto the escape axis first, then thrust with everything. Strictly better given enough
+//     time, and strictly worse when there isn't enough left to complete the turn.
+//
+// Both use our own upgraded thrust and rotation stats, which - unlike an enemy's - we can read
+// directly. Displacement is the usual (1/2)at^2; the shot's own travel is already accounted for by
+// the caller, which measures closest approach in the relative frame.
+inline float GetDodgeDistance(Game& game, const Player& self, const Vector2f& threat_direction, float seconds) {
+  if (seconds <= 0.0f) return 0.0f;
+
+  auto& ship = game.ship_controller.ship;
+
+  float thrust = ship.thrust * (10.0f / 16.0f);
+  if (thrust <= 0.0f) return 0.0f;
+
+  // Rotation is in units where 400 is a full revolution per second.
+  float rotation_rate = (ship.rotation / 400.0f) * 2.0f * 3.14159265f;
+
+  Vector2f across = Perpendicular(threat_direction);
+
+  // Fraction of our thrust that currently pushes across the shot rather than along it. Absolute
+  // value because reverse thrust is just as good as forward for getting out of the way, and either
+  // side of the shot's path counts as a miss.
+  float alignment = fabsf(self.GetHeading().Dot(across));
+  if (alignment > 1.0f) alignment = 1.0f;
+
+  float immediate = 0.5f * thrust * alignment * seconds * seconds;
+
+  float best = immediate;
+
+  if (rotation_rate > 0.0f) {
+    float turn_seconds = acosf(alignment) / rotation_rate;
+
+    if (seconds > turn_seconds) {
+      float remaining = seconds - turn_seconds;
+      float aligned = 0.5f * thrust * remaining * remaining;
+
+      if (aligned > best) best = aligned;
+    }
+  }
+
+  return best;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Ship motion model
 // ---------------------------------------------------------------------------------------------
 

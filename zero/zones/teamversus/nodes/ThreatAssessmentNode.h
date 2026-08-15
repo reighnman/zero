@@ -19,21 +19,16 @@ inline constexpr float kNoThreatTime = 999.0f;
 // treating as a hit. This widens the hull a little for that intersection test only.
 inline constexpr float kBulletHitboxSlop = 1.6f;
 
-// Seconds. Inside this, a shot can no longer be dodged: there is not enough time left to rotate the
-// hull and thrust far enough to change where it lands. Outside it, moving is the correct answer and
-// spending an item is a waste of the item.
-inline constexpr float kReactionHorizon = 0.6f;
-
 // Everything the defensive half of the tree needs to know about what is currently flying at us.
 struct ThreatReport {
   // Total damage we expect to actually take if we hold our current course, in raw energy.
   float damage = 0.0f;
-  // The subset of that damage arriving within kReactionHorizon - i.e. the part we can no longer
-  // dodge our way out of. This is the number a defensive item decision is actually about. Total
-  // inbound damage is the wrong quantity for that: a bomb two seconds out contributes to it in full
-  // and is also completely avoidable by moving, so gating on the total spends items on shots that
-  // were never going to connect.
-  float imminent_damage = 0.0f;
+  // Damage still landing after the best dodge physically available in the time remaining. This is
+  // the number a defensive item decision is actually about, and it is not a subset of the above
+  // selected by some cutoff - it is the same threats re-evaluated at the distance we could open up
+  // before they arrive. A bullet we can step out of contributes nothing here however lethal it looks
+  // on the current course; a bomb we can only half escape contributes its reduced blast.
+  float unavoidable_damage = 0.0f;
   // Unit vector pointing away from the threat axis - the direction that most increases our miss
   // distance. Zero when there is no threat.
   Vector2f escape_direction;
@@ -119,7 +114,19 @@ inline ThreatReport AssessThreats(behavior::ExecuteContext& ctx, Player* self, f
       approach_distance = closest_point.Distance(self->position);
     }
 
+    // How much further from the shot we could be by the time it gets here, if we spent the whole
+    // interval doing nothing but getting out of the way. Zero for a mine, which is not travelling
+    // toward us and whose fuse trips on contact rather than after a flight.
+    float dodge_distance = 0.0f;
+
+    if (!is_mine && relative_speed >= 0.01f) {
+      dodge_distance = GetDodgeDistance(game, *self, relative_velocity * (1.0f / relative_speed), approach_time);
+    }
+
+    float dodged_distance = approach_distance + dodge_distance;
+
     float damage = 0.0f;
+    float unavoidable = 0.0f;
 
     if (is_bomb) {
       // Only bombs need a detonation model at all: the proximity fuse trips before contact, so the
@@ -132,12 +139,19 @@ inline ThreatReport AssessThreats(behavior::ExecuteContext& ctx, Player* self, f
       if (approach_distance > blast_radius) continue;
 
       float max_damage = (float)GetEstimatedWeaponDamage(weapon, game.connection);
+
       damage = max_damage * GetBlastDamageFraction(game, weapon.data.level, approach_distance);
+      // A blast cannot be stepped out of the way of, only stepped further from - and since the
+      // falloff is linear, every tile of dodge is a real reduction rather than an all-or-nothing.
+      unavoidable = max_damage * GetBlastDamageFraction(game, weapon.data.level, dodged_distance);
     } else {
       // Bullets have no fuse, so they only matter if the shot actually crosses our hull.
-      if (approach_distance > ship_radius * kBulletHitboxSlop) continue;
+      float hit_extent = ship_radius * kBulletHitboxSlop;
+      if (approach_distance > hit_extent) continue;
 
       damage = (float)GetEstimatedWeaponDamage(weapon, game.connection);
+      // All or nothing: clear the hull and it does nothing at all.
+      unavoidable = dodged_distance > hit_extent ? 0.0f : damage;
     }
 
     if (damage <= 0.0f) continue;
@@ -162,8 +176,7 @@ inline ThreatReport AssessThreats(behavior::ExecuteContext& ctx, Player* self, f
 
     weighted_escape += escape * damage;
     report.damage += damage;
-
-    if (approach_time <= kReactionHorizon) report.imminent_damage += damage;
+    report.unavoidable_damage += unavoidable;
 
     if (approach_time < soonest_impact) {
       soonest_impact = approach_time;
@@ -199,7 +212,7 @@ struct ThreatAssessmentNode : public behavior::BehaviorNode {
     ThreatReport report = AssessThreats(ctx, self, check_distance);
 
     ctx.blackboard.Set<float>("threat_damage", report.damage);
-    ctx.blackboard.Set<float>("threat_imminent_damage", report.imminent_damage);
+    ctx.blackboard.Set<float>("threat_unavoidable_damage", report.unavoidable_damage);
     ctx.blackboard.Set<float>("threat_count", (float)report.count);
     ctx.blackboard.Set<float>("threat_time", report.time_to_impact);
     ctx.blackboard.Set<Vector2f>("threat_escape", report.escape_direction);
@@ -215,10 +228,14 @@ struct ThreatAssessmentNode : public behavior::BehaviorNode {
     }
 
     // The stronger flag, and the one that justifies spending a defensive item: this will kill us
-    // *and* there is no longer time to move out of its way. The two conditions have to be tested
-    // together. A lethal volley two seconds out is a movement problem, and treating it as an item
+    // *even after we dodge as hard as we can*. The two conditions have to be tested together. A
+    // lethal volley we can still fly out of is a movement problem, and treating it as an item
     // problem burns a repel on something a thrust would have cleared; an unavoidable volley we can
     // survive is not a problem at all.
+    //
+    // Note this compares post-dodge damage rather than damage on the current course, which is the
+    // difference between "something lethal is pointed at me" and "I am going to be hit by it". The
+    // first is true constantly in a firefight.
     //
     // The recharge that lands before impact is included because the comparison is against the energy
     // we will have when it hits, not the energy we have now. Without it a bot sitting exactly on the
@@ -230,7 +247,7 @@ struct ThreatAssessmentNode : public behavior::BehaviorNode {
     float max_energy = (float)game.ship_controller.ship.energy;
     if (energy_at_impact > max_energy) energy_at_impact = max_energy;
 
-    if (report.count > 0 && report.imminent_damage >= energy_at_impact) {
+    if (report.count > 0 && report.unavoidable_damage >= energy_at_impact) {
       ctx.blackboard.Set<bool>("threat_unavoidable", true);
     } else {
       ctx.blackboard.Erase("threat_unavoidable");

@@ -30,9 +30,13 @@ namespace teamversus {
 // unavoidable-but-survivable is not a problem at all.
 //
 // Both come from "threat_unavoidable", which ThreatAssessmentNode publishes from the single
-// perception-pass scan - it compares only the damage arriving inside the reaction horizon against
-// the energy we will actually have when it lands, recharge included. This node deliberately does not
-// rescan. It used to, with its own narrower distance, and two separately-configured scans of the
+// perception-pass scan. "No longer time to dodge" there is computed rather than assumed: each threat
+// is re-evaluated at the distance we could physically open up before it arrives, given our thrust,
+// our rotation rate and where our nose currently points. That last part is why a fixed reaction time
+// cannot do the job - a ship already broadside to the shot displaces from tick one, while one
+// pointed down the shot's path spends most of the window turning before any thrust helps, and
+// treating those alike is exactly what makes a bot repel something it could have flown out of. This
+// node deliberately does not rescan. It used to, with its own narrower distance, and two separately-configured scans of the
 // same weapon list is exactly how a bot ends up believing a volley is fatal enough to break aim for
 // but not fatal enough to repel. One scan, one verdict.
 //
