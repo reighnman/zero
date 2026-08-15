@@ -67,6 +67,9 @@ ServerInfo kServers[] = {
     {"SSCU Trench Wars", "127.0.0.1", 5000, Zone::TrenchWars},
     {"Nexus", "127.0.0.1", 5000, Zone::Nexus},
     {"HockeyZone", "127.0.0.1", 5000, Zone::HockeyZone},
+    // Team knockout matches. Points at the same local server as the other versus zones by default;
+    // override with a [Servers] entry the same way as any other zone.
+    {"TeamVersus", "127.0.0.1", 5000, Zone::TeamVersus},
 };
 
 static_assert(ZERO_ARRAY_SIZE(kServers) == (size_t)Zone::Count - 1);
@@ -108,6 +111,10 @@ const std::unordered_map<std::string_view, ServerInfo*> kServerMap = {
     {"hockeyzone", &kServers[8]},
     {"hockey", &kServers[8]},
     {"hz", &kServers[8]},
+
+    {"teamversus", &kServers[9]},
+    {"team versus", &kServers[9]},
+    {"tv", &kServers[9]},
 };
 
 const char* kLoginName = "ZeroBot";
@@ -147,6 +154,7 @@ static void PrintUsage(std::string_view path) {
       "-s, --server\t\t\toverrides server name\n"
       "\t\t\t\tvalues: local, subgame, hs\n"
       "\t\t\t\t\tdeva, mg, eg, tw, nexus\n"
+      "\t\t\t\t\thz, teamversus\n"
       "-a, --arena\t\t\tsets default arena\n"
       "--ship\t\t\t\tsets default ship\n"
       "-b, --behavior\t\t\tsets default behavior\n"
