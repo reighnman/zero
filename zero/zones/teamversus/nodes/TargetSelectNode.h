@@ -137,6 +137,7 @@ struct TargetSelectNode : public behavior::BehaviorNode {
       ctx.blackboard.Erase("target_energy");
       ctx.blackboard.Erase("target_energy_percent");
       ctx.blackboard.Erase("target_distance");
+      ctx.blackboard.Erase("target_speed");
       ctx.blackboard.Erase("target_isolation");
 
       return behavior::ExecuteResult::Failure;
@@ -148,6 +149,11 @@ struct TargetSelectNode : public behavior::BehaviorNode {
     ctx.blackboard.Set<float>("target_energy", energy_tracker.GetEnergy(*best));
     ctx.blackboard.Set<float>("target_energy_percent", energy_tracker.GetEnergyPercent(*best));
     ctx.blackboard.Set<float>("target_distance", best->position.Distance(self->position));
+    // Speed, not heading. How fast they are actually travelling is what bounds how far they can
+    // displace during a shot's flight, and it is a different question from which way the hull is
+    // pointed - in a real orbit those differ by 75-95 degrees. The aim solver consumes both
+    // separately; the fire gate uses this one to decide how long a flight it is willing to accept.
+    ctx.blackboard.Set<float>("target_speed", best->velocity.Length());
     ctx.blackboard.Set<float>("target_isolation", GetSupportDistance(game, *best));
 
     return behavior::ExecuteResult::Success;

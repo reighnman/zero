@@ -12,20 +12,26 @@ namespace teamversus {
 // Decides when to drop a decoy - a temporary mirrored copy of ourselves that enemies have to sort
 // out from the real thing.
 //
-// The measured usage pattern is the opposite of what a "defensive item" naming suggests, and it is
-// worth stating because it is easy to get backwards:
+// This is scoped to escaping a losing position, not to setting one up. The measured human usage
+// points the other way (median 60% energy, median 37 tiles to the nearest enemy - a misdirect played
+// before the fight closes rather than after), but a decoy dropped at healthy energy is a decoy we do
+// not have at the moment we are actually about to die, and there are only two of them. So the whole
+// item budget goes to the dire case, alongside the portal, with the repel held back behind both.
 //
-//     energy at time of use : median 60%
-//     distance to nearest enemy : p25 26t   median 37t   p75 48t
+// What a decoy can and cannot do bounds when it is worth pressing:
 //
-// Compare to repels, which get spent at 30% energy and 13 tiles. Decoys are used *far away and at
-// healthy energy* - they are a misdirection played before the fight closes, not a panic response
-// once it has. That makes sense mechanically: a decoy mirrors position and heading, so it is
-// convincing at the range where a defender is picking a target off the radar and useless at the
-// range where they can see which one is shooting.
+//  - It mirrors our position and heading, so it is convincing to someone reading the radar or
+//    tracking a contact at range, and transparent to someone close enough to watch which of the two
+//    ships is firing. Hence the distance band: too close and it fools nobody, too far and there was
+//    no urgency to spend it.
+//  - It does not stop damage. Anything already in flight still arrives. What it buys is the *next*
+//    volley being aimed at the wrong ship, which is worth something only if somebody is currently
+//    aiming at us at all - hence the facing check. Dropped with nobody looking our way, it is simply
+//    an item deleted.
 //
-// The other gate is that a decoy is only worth anything if somebody is in a position to be fooled.
-// Dropping one with no enemy looking in our direction just spends an item.
+// The press-rate cooldown lives in the tree (ItemCooldownNode) rather than here, so that every item
+// shares one debounce mechanism and the timer is claimed by the branch that actually presses the key
+// rather than by whichever node happened to evaluate the decision.
 struct DecoyDeceptionNode : public behavior::BehaviorNode {
   DecoyDeceptionNode() {}
 
@@ -42,41 +48,30 @@ struct DecoyDeceptionNode : public behavior::BehaviorNode {
       return behavior::ExecuteResult::Failure;
     }
 
-    if (TICK_DIFF(GetCurrentTick(), last_use_tick) < (s32)cooldown_ticks && last_use_tick != 0) {
-      return behavior::ExecuteResult::Failure;
-    }
-
+    // Only when we are genuinely in trouble. Above this the item is better saved - we are still able
+    // to fight or to leave under our own power, and neither of those is improved by a decoy.
     float energy_percent = GetSelfEnergyPercent(game, *self);
-    if (energy_percent < min_energy_percent) return behavior::ExecuteResult::Failure;
+    if (energy_percent > max_energy_percent) return behavior::ExecuteResult::Failure;
 
-    float target_distance = ctx.blackboard.ValueOr<float>("target_distance", 0.0f);
-    if (target_distance < min_distance) return behavior::ExecuteResult::Failure;
-
-    // Only worth it if someone could actually be deceived - an enemy who is roughly facing us and
-    // far enough out that a mirrored ship is genuinely ambiguous.
+    // Somebody has to be in a position to be fooled, at a range where the copy is ambiguous.
     if (!HasDeceivableEnemy(game, *self)) return behavior::ExecuteResult::Failure;
-
-    last_use_tick = GetCurrentTick();
 
     return behavior::ExecuteResult::Success;
   }
 
-  // Matches the measured median energy at use. Below this the item is better saved, since a decoy
-  // does not stop damage and we are about to need something that does.
-  float min_energy_percent = 0.55f;
+  // Energy at or below which a decoy is worth spending. Sits at the band where we are losing the
+  // exchange and need the next volley to go somewhere else.
+  float max_energy_percent = 0.45f;
 
-  // A little inside the measured p25 of 26 tiles. Closer than this and a decoy is transparent.
-  float min_distance = 24.0f;
-
-  // Decoys are limited and the effect lasts a while; there is no value in stacking them.
-  u32 cooldown_ticks = 900;
+  // Closer than this an enemy can simply see which ship is real; further than this we had other
+  // options and did not need to spend the item.
+  float min_distance = 12.0f;
+  float max_distance = 45.0f;
 
   // How far off an enemy's nose we still count them as looking at us, as a dot product.
   float facing_threshold = 0.5f;
 
  private:
-  Tick last_use_tick = 0;
-
   bool HasDeceivableEnemy(Game& game, const Player& self) const {
     auto& pm = game.player_manager;
 
@@ -88,8 +83,7 @@ struct DecoyDeceptionNode : public behavior::BehaviorNode {
       Vector2f to_self = self.position - enemy->position;
       float distance = to_self.Length();
 
-      if (distance < min_distance) continue;
-      if (distance <= 0.0f) continue;
+      if (distance < min_distance || distance > max_distance) continue;
 
       if ((to_self * (1.0f / distance)).Dot(enemy->GetHeading()) >= facing_threshold) return true;
     }

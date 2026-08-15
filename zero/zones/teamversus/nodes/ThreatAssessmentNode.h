@@ -19,10 +19,21 @@ inline constexpr float kNoThreatTime = 999.0f;
 // treating as a hit. This widens the hull a little for that intersection test only.
 inline constexpr float kBulletHitboxSlop = 1.6f;
 
+// Seconds. Inside this, a shot can no longer be dodged: there is not enough time left to rotate the
+// hull and thrust far enough to change where it lands. Outside it, moving is the correct answer and
+// spending an item is a waste of the item.
+inline constexpr float kReactionHorizon = 0.6f;
+
 // Everything the defensive half of the tree needs to know about what is currently flying at us.
 struct ThreatReport {
   // Total damage we expect to actually take if we hold our current course, in raw energy.
   float damage = 0.0f;
+  // The subset of that damage arriving within kReactionHorizon - i.e. the part we can no longer
+  // dodge our way out of. This is the number a defensive item decision is actually about. Total
+  // inbound damage is the wrong quantity for that: a bomb two seconds out contributes to it in full
+  // and is also completely avoidable by moving, so gating on the total spends items on shots that
+  // were never going to connect.
+  float imminent_damage = 0.0f;
   // Unit vector pointing away from the threat axis - the direction that most increases our miss
   // distance. Zero when there is no threat.
   Vector2f escape_direction;
@@ -152,6 +163,8 @@ inline ThreatReport AssessThreats(behavior::ExecuteContext& ctx, Player* self, f
     weighted_escape += escape * damage;
     report.damage += damage;
 
+    if (approach_time <= kReactionHorizon) report.imminent_damage += damage;
+
     if (approach_time < soonest_impact) {
       soonest_impact = approach_time;
       report.origin = weapon.position;
@@ -186,6 +199,7 @@ struct ThreatAssessmentNode : public behavior::BehaviorNode {
     ThreatReport report = AssessThreats(ctx, self, check_distance);
 
     ctx.blackboard.Set<float>("threat_damage", report.damage);
+    ctx.blackboard.Set<float>("threat_imminent_damage", report.imminent_damage);
     ctx.blackboard.Set<float>("threat_count", (float)report.count);
     ctx.blackboard.Set<float>("threat_time", report.time_to_impact);
     ctx.blackboard.Set<Vector2f>("threat_escape", report.escape_direction);
@@ -198,6 +212,28 @@ struct ThreatAssessmentNode : public behavior::BehaviorNode {
       ctx.blackboard.Set<bool>("threat_lethal", true);
     } else {
       ctx.blackboard.Erase("threat_lethal");
+    }
+
+    // The stronger flag, and the one that justifies spending a defensive item: this will kill us
+    // *and* there is no longer time to move out of its way. The two conditions have to be tested
+    // together. A lethal volley two seconds out is a movement problem, and treating it as an item
+    // problem burns a repel on something a thrust would have cleared; an unavoidable volley we can
+    // survive is not a problem at all.
+    //
+    // The recharge that lands before impact is included because the comparison is against the energy
+    // we will have when it hits, not the energy we have now. Without it a bot sitting exactly on the
+    // threshold spends an item on damage it was going to absorb with energy to spare.
+    auto& game = *ctx.bot->game;
+    float recharge_per_second = (float)game.ship_controller.ship.recharge / 10.0f;
+    float energy_at_impact = self->energy + recharge_per_second * report.time_to_impact;
+
+    float max_energy = (float)game.ship_controller.ship.energy;
+    if (energy_at_impact > max_energy) energy_at_impact = max_energy;
+
+    if (report.count > 0 && report.imminent_damage >= energy_at_impact) {
+      ctx.blackboard.Set<bool>("threat_unavoidable", true);
+    } else {
+      ctx.blackboard.Erase("threat_unavoidable");
     }
 
     return report.count > 0 ? behavior::ExecuteResult::Success : behavior::ExecuteResult::Failure;

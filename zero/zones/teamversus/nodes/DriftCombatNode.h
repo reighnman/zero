@@ -151,14 +151,25 @@ struct DriftCombatNode : public behavior::BehaviorNode {
   u32 pump_duration = 0;
 
   // Commits to one rotation direction for the engagement instead of recomputing it every tick,
-  // which would just cancel out into no rotation at all. Picks whichever way is already closer to
-  // our heading so committing costs the smaller turn.
+  // which would just cancel out into no rotation at all. Picks whichever way we are *already
+  // travelling*, so committing costs the least momentum to establish.
+  //
+  // Travel, not facing. Those are two different vectors and in this movement model they are
+  // deliberately far apart - the measured offset between heading and direction of travel is 75-95
+  // degrees, and the whole point of the orbit is that the nose stays on the target while the ship
+  // moves across it. Choosing the orbit direction from where the nose points therefore says almost
+  // nothing about which way is cheap to turn into, and at a 90 degree offset it is a coin flip that
+  // routinely picks the direction that has to kill all our existing momentum first. Facing is only
+  // used as the fallback when we are barely moving and there is no travel direction to read.
   float GetOrbitDirection(behavior::ExecuteContext& ctx, const Vector2f& radial, const Player& self) {
     PlayerId target_id = ctx.blackboard.ValueOr<PlayerId>("target_id", kInvalidPlayerId);
 
     if (orbit_direction == 0.0f || target_id != orbit_target) {
+      Vector2f travel = self.velocity;
+      if (travel.LengthSq() < 1.0f) travel = self.GetHeading();
+
       Vector2f tangent = Perpendicular(radial);
-      orbit_direction = tangent.Dot(self.GetHeading()) >= 0.0f ? 1.0f : -1.0f;
+      orbit_direction = tangent.Dot(travel) >= 0.0f ? 1.0f : -1.0f;
       orbit_target = target_id;
     }
 

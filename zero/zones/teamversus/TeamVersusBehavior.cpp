@@ -18,6 +18,7 @@
 #include <zero/zones/teamversus/nodes/EvasiveManeuverNode.h>
 #include <zero/zones/teamversus/nodes/FireCadenceNode.h>
 #include <zero/zones/teamversus/nodes/InterceptAimNode.h>
+#include <zero/zones/teamversus/nodes/ItemCooldownNode.h>
 #include <zero/zones/teamversus/nodes/MatchStateNode.h>
 #include <zero/zones/teamversus/nodes/MineLayNode.h>
 #include <zero/zones/teamversus/nodes/PortalEscapeNode.h>
@@ -146,6 +147,15 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
   // against a 12.5 tile/sec muzzle speed), and the corpus's own hit rate is at the noise floor well
   // before that; this sits above the p75 human firing range so it costs no real volume.
   constexpr float kBulletMaxRange = 45.0f;
+  // Longest world-frame flight each weapon will accept - how much warning we are willing to give the
+  // target. This is what makes our own velocity part of the fire decision: a shot leaves at our
+  // velocity plus the muzzle velocity, so standing still means 12.5 tiles/sec, slower than the ship
+  // it is chasing, and at 30 tiles that is a 2.4 second flight nobody sits still for. Bullets are
+  // held tight because they need a real hit; bombs and thors are looser because a late bomb still
+  // denies the ground it lands on.
+  constexpr float kBulletMaxFlightTime = 1.5f;
+  constexpr float kBombMaxFlightTime = 2.2f;
+  constexpr float kThorMaxFlightTime = 2.2f;
   // Thors pass through walls, which is the entire reason to spend one: a target we cannot otherwise
   // reach. Rare in real play (150 uses against 46,000 bullets), used at a median 25 tiles.
   constexpr float kThorMaxRange = 30.0f;
@@ -157,6 +167,21 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
   // evasive node still nudges, but keeps the nose on target - damage taken per sample is lowest
   // nose-on (5.37) and highest broadside (8.50), so turning away is a trade, not free protection.
   constexpr float kLethalFraction = 1.0f;
+
+  // --- items --------------------------------------------------------------------------------
+  // One second between two presses of the same item key. Long enough for the item's effect to
+  // actually happen and for the next perception pass to see the result, which is the whole point -
+  // the alternative is re-deciding an unchanged situation every tick and emptying the item.
+  constexpr u32 kItemDebounceTicks = 100;
+  // Decoys get a much longer one on top of that. The ghost persists for a while and a second one
+  // does not make the first more convincing, so this is an anti-stacking interval rather than a
+  // debounce.
+  constexpr u32 kDecoyCooldownTicks = 900;
+
+  // Antiwarp is never up below 75% energy, because it suppresses our own recharge the entire time it
+  // is running. Raise a little above the floor so recharge crossing the line does not toggle it.
+  constexpr float kAntiwarpDropEnergy = 0.75f;
+  constexpr float kAntiwarpRaiseEnergy = 0.80f;
 
   // Safety net if the "GO!" match-start message is ever missed. Generous, because reacting late is
   // far better than a bot that starts shooting during a ready check.
@@ -254,44 +279,88 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
         //    Success-decorated so spending (or not spending) an item never decides whether the
         //    bot moves and shoots this tick.
         // =====================================================================================
+        //    Every item press is debounced by an ItemCooldownNode sitting immediately before its
+        //    InputActionNode. None of these items produce an observable effect on the tick they are
+        //    used - a repel takes time to push shots clear, a decoy takes time to be mis-targeted, a
+        //    warp takes time to move us and for perception to see it - while the condition that
+        //    triggered them is still true on the next tick and the tick after. Without a debounce
+        //    the tree re-decides the same unchanged situation at 100Hz and empties the item down to
+        //    zero against a single incoming bomb. The cooldown node claims its timer on success, so
+        //    it must stay the last gate before the key press.
         .Sequence(CompositeDecorator::Success)
             .Selector()
-                .Sequence()  // Repel first: it stops the damage AND leaves us in position.
-                    .Child<RepelDecisionNode>()
-                    .Child<InputActionNode>(InputAction::Repel)
-                    .End()
-                .Sequence()  // Portal is the fallback once repels are gone - instant, but one-way.
+                // --- dire: something inbound is going to kill us --------------------------------
+                // Escalation order is portal, then decoy, then repel. Repel is last not because it
+                // is the weakest - it is the only one of the three that actually stops the damage
+                // and leaves us in position - but because it is the scarcest and the most
+                // universally applicable. Anything the other two can solve should be solved by them,
+                // so the repel is still there for the case nothing else covers.
+                .Sequence()
                     .Child<BlackboardSetQueryNode>("threat_lethal")
-                    .Child<PortalEscapeNode>()
-                    .Child<WarpNode>()
+                    .Selector()
+                        // Instant and total: removes us from the fight rather than surviving it.
+                        // The node checks the marker still exists and that the far end is an
+                        // improvement, so this fails harmlessly when there is nowhere good to go.
+                        .Sequence()
+                            .Child<PortalEscapeNode>()
+                            .Child<ItemCooldownNode>("warp", kItemDebounceTicks)
+                            .Child<WarpNode>()
+                            .Child<ScalarNode>(1.0f, "bomb_slot_used")
+                            .End()
+                        // Can't leave: make the next volley go somewhere else instead.
+                        .Sequence()
+                            .Child<DecoyDeceptionNode>()
+                            .Child<ItemCooldownNode>("decoy", kDecoyCooldownTicks)
+                            .Child<InputActionNode>(InputAction::Decoy)
+                            .Child<ScalarNode>(1.0f, "bomb_slot_used")
+                            .End()
+                        // Last resort. RepelDecisionNode additionally requires that the damage is
+                        // no longer dodgeable, so this does not fire on a lethal volley we still
+                        // have time to thrust out of.
+                        .Sequence()
+                            .Child<RepelDecisionNode>()
+                            .Child<ItemCooldownNode>("repel", kItemDebounceTicks)
+                            .Child<InputActionNode>(InputAction::Repel)
+                            .Child<ScalarNode>(1.0f, "bomb_slot_used")
+                            .End()
+                        .End()
                     .End()
+
+                // --- housekeeping: nothing is currently trying to kill us -----------------------
                 .Sequence()  // Lay a marker while things are calm, so one exists when they aren't.
                     .Child<PortalLayNode>()
+                    .Child<ItemCooldownNode>("portal", kItemDebounceTicks)
                     .Child<InputActionNode>(InputAction::Portal)
-                    .Child<ScalarNode>(1.0f, "bomb_slot_used")
-                    .End()
-                .Sequence()  // Decoys are a long-range misdirect, not a panic button - see the node.
-                    .Child<DecoyDeceptionNode>()
-                    .Child<InputActionNode>(InputAction::Decoy)
                     .Child<ScalarNode>(1.0f, "bomb_slot_used")
                     .End()
                 .Sequence()  // Mine the ground behind us while withdrawing from a pursuer.
                     .Child<MineLayNode>()
+                    .Child<ItemCooldownNode>("mine", kItemDebounceTicks)
                     .Child<InputActionNode>(InputAction::Mine)
                     .Child<ScalarNode>(1.0f, "bomb_slot_used")
                     .End()
                 .End()
             .End()
 
-        // Antiwarp denies the portal escape to anyone inside it, which is worth exactly as much as
-        // the kill we are trying to close out - so it goes on while pressing and comes off the
-        // moment we can't spare the drain.
+        // Antiwarp denies the portal escape to anyone caught inside it, which is worth exactly as
+        // much as the kill we are trying to close out - so it goes on while pressing and comes off
+        // the moment we can't spare it.
+        //
+        // "Can't spare it" is about recharge, not about the field. Antiwarp suppresses our own
+        // energy recharge for as long as it is up, which makes it the one item whose cost is paid
+        // continuously and invisibly: a bot that leaves it on is not merely wasting something, it is
+        // fighting the whole engagement with its regeneration switched off, and it will lose trades
+        // it should win without anything obviously going wrong. So it is only ever up while we are
+        // comfortably healthy, and drops the instant we are not.
         .Selector(CompositeDecorator::Success)
             .Sequence()
                 .Child<ShipCapabilityQueryNode>(ShipCapability_Antiwarp)
                 .Child<BlackboardSetQueryNode>("phase_press")
-                .Child<PlayerEnergyPercentThresholdNode>(0.7f)
+                // Turn-on sits above the turn-off floor rather than on it, so a bot hovering at the
+                // threshold does not toggle every time recharge crosses the line.
+                .Child<PlayerEnergyPercentThresholdNode>(kAntiwarpRaiseEnergy)
                 .InvertChild<PlayerStatusQueryNode>(Status_Antiwarp)
+                .Child<ItemCooldownNode>("antiwarp", kItemDebounceTicks)
                 .Child<InputActionNode>(InputAction::Antiwarp)
                 .End()
             .Sequence()
@@ -299,8 +368,13 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
                 .Child<PlayerStatusQueryNode>(Status_Antiwarp)
                 .Selector()
                     .InvertChild<BlackboardSetQueryNode>("phase_press")
-                    .InvertChild<PlayerEnergyPercentThresholdNode>(0.6f)
+                    .InvertChild<PlayerEnergyPercentThresholdNode>(kAntiwarpDropEnergy)
                     .End()
+                // Shares the "antiwarp" timer with the branch above, so an on-toggle and an
+                // off-toggle cannot land inside the same window. Status arrives from the server a
+                // round trip late, so without this the bot toggles again before it can see that the
+                // first toggle took, and ends up flickering the field on and off.
+                .Child<ItemCooldownNode>("antiwarp", kItemDebounceTicks)
                 .Child<InputActionNode>(InputAction::Antiwarp)
                 .End()
             .End()
@@ -437,7 +511,7 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
                             .InvertChild<DistanceThresholdNode>("target_position", kThorMaxRange)
                             .InvertChild<VisibilityQueryNode>("target_position")
                             .InvertChild<ScalarThresholdNode<float>>("target_energy_percent", kThorTargetEnergyPercent)
-                            .Child<ShotClearanceNode>(WeaponType::Thor, "bomb_predicted", kThorHitTolerance)
+                            .Child<ShotClearanceNode>(WeaponType::Thor, "bomb_predicted", kThorHitTolerance, kThorMaxFlightTime)
                             .Child<InputActionNode>(InputAction::Thor)
                             .End()
 
@@ -453,7 +527,7 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
                             .Child<PlayerEnergyPercentThresholdNode>(kBombEnergyFloor)
                             .Child<DistanceThresholdNode>("target_position", kBombMinRange)
                             .InvertChild<DistanceThresholdNode>("target_position", kBombMaxRange)
-                            .Child<ShotClearanceNode>(WeaponType::Bomb, "bomb_predicted", kBombHitTolerance)
+                            .Child<ShotClearanceNode>(WeaponType::Bomb, "bomb_predicted", kBombHitTolerance, kBombMaxFlightTime)
                             .Child<InputActionNode>(InputAction::Bomb)
                             .End()
 
@@ -467,7 +541,8 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
                                 .Child<BlackboardSetQueryNode>("phase_press")
                                 .Child<PlayerEnergyPercentThresholdNode>(kBulletEnergyFloor)
                                 .End()
-                            .Child<ShotClearanceNode>(WeaponType::Bullet, "bullet_predicted", kBulletHitTolerance)
+                            .Child<ShotClearanceNode>(WeaponType::Bullet, "bullet_predicted", kBulletHitTolerance,
+                                                     kBulletMaxFlightTime)
                             .Child<FireCadenceNode>()  // Human trigger rhythm - runs last, so it only
                                                        // consumes its budget on shots we actually take.
                             .Child<InputActionNode>(InputAction::Bullet)

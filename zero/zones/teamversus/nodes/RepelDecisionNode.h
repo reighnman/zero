@@ -24,18 +24,28 @@ namespace teamversus {
 // middle of taking real damage, and it works - incoming damage drops by more than half immediately
 // afterward. Almost nobody spends one above 70% energy.
 //
-// So the gate is: something is inbound that we cannot afford, and it is close enough that a repel
-// actually reaches it. The reach check matters because RepelDistance bounds what a repel can push;
-// spending one on a bomb still 20 tiles out accomplishes nothing except being out of repels when
-// the next one arrives.
+// So the gate is two conditions that only mean anything together: the damage about to land would
+// kill us, and there is no longer time to dodge it. Either alone is wrong. Lethal-but-avoidable is a
+// movement problem and spending a repel on it wastes the item on a shot a thrust would have cleared;
+// unavoidable-but-survivable is not a problem at all.
 //
-// The energy condition is expressed against the *threat*, not as a fixed percentage. A 750-damage
-// bomb centred on us is fatal at 40% energy and survivable at full, and the same repel is correct
-// in the first case and wasted in the second.
+// Both come from "threat_unavoidable", which ThreatAssessmentNode publishes from the single
+// perception-pass scan - it compares only the damage arriving inside the reaction horizon against
+// the energy we will actually have when it lands, recharge included. This node deliberately does not
+// rescan. It used to, with its own narrower distance, and two separately-configured scans of the
+// same weapon list is exactly how a bot ends up believing a volley is fatal enough to break aim for
+// but not fatal enough to repel. One scan, one verdict.
 //
-// This node only decides; the tree presses the key. Keeping the decision separate from the input
-// means the same judgement can gate a fallback (use the portal instead) without duplicating any of
-// the reasoning above.
+// The energy condition being expressed against the *threat* rather than as a fixed percentage is the
+// whole point. A 750-damage bomb centred on us is fatal at 40% energy and survivable at full, and
+// the same repel is correct in the first case and wasted in the second.
+//
+// What is left here is the part specific to the repel itself: do we have one, is it off the game's
+// own cooldown, and is the thing we are trying to push actually within reach. RepelDistance bounds
+// what a repel can move; one spent on a bomb outside that radius accomplishes nothing except being
+// out of repels when the next one arrives.
+//
+// This node only decides; the tree presses the key.
 struct RepelDecisionNode : public behavior::BehaviorNode {
   RepelDecisionNode() {}
 
@@ -50,47 +60,21 @@ struct RepelDecisionNode : public behavior::BehaviorNode {
       return behavior::ExecuteResult::Failure;
     }
 
-    // How far a repel actually pushes things, in tiles. Anything further out is unaffected, so
-    // that bounds the scan - but only bounds it. Scanning the full radius would total up shots that
-    // are still two seconds away and perfectly dodgeable, and spend a scarce item on them. Real
-    // repels go out at a median 13 tiles to the nearest enemy, which is the range where dodging has
-    // stopped being an option.
+    // Lethal and no longer dodgeable. Both halves of that come from the one perception-pass scan.
+    if (!ctx.blackboard.Has("threat_unavoidable")) return behavior::ExecuteResult::Failure;
+
+    // Is the thing we want to push actually within push range? A repel moves what is inside
+    // RepelDistance and nothing beyond it, so pressing the key against something further out spends
+    // the item and changes nothing.
+    Vector2f threat_origin = ctx.blackboard.ValueOr<Vector2f>("threat_origin", self->position);
     float repel_range = game.connection.settings.RepelDistance / 16.0f;
-    float scan_distance = repel_range < max_scan_distance ? repel_range : max_scan_distance;
 
-    ThreatReport report = AssessThreats(ctx, self, scan_distance);
-    if (report.count == 0) return behavior::ExecuteResult::Failure;
-
-    // Still enough time to move out of the way? Then move instead. A repel spent on something we
-    // could have dodged is a repel we don't have when there's no time left to dodge.
-    if (report.time_to_impact > impact_horizon) return behavior::ExecuteResult::Failure;
-
-    // Would this actually kill us, allowing for the recharge that lands before impact? Without the
-    // recharge term a bot at exactly the damage threshold burns a repel on something it was going
-    // to survive with energy to spare.
-    float recharge_per_second = (float)game.ship_controller.ship.recharge / 10.0f;
-    float energy_at_impact = self->energy + recharge_per_second * report.time_to_impact;
-
-    float max_energy = (float)game.ship_controller.ship.energy;
-    if (energy_at_impact > max_energy) energy_at_impact = max_energy;
-
-    if (report.damage < energy_at_impact * lethal_margin) return behavior::ExecuteResult::Failure;
+    if (threat_origin.DistanceSq(self->position) > repel_range * repel_range) {
+      return behavior::ExecuteResult::Failure;
+    }
 
     return behavior::ExecuteResult::Success;
   }
-
-  // Fire when incoming damage reaches this fraction of the energy we'll have when it lands. Below
-  // 1.0 because the damage estimate is exactly that - an estimate - and being wrong in the
-  // direction of "survived with 5 energy" is much worse than being wrong in the direction of
-  // "spent a repel slightly early".
-  float lethal_margin = 0.85f;
-
-  // Matches the measured median range at which repels actually get used, and is about a second of
-  // bullet flight - roughly the point where turning and thrusting can no longer clear the shot.
-  float max_scan_distance = 14.0f;
-
-  // Seconds. Inside this, dodging is no longer a realistic alternative.
-  float impact_horizon = 0.6f;
 };
 
 }  // namespace teamversus

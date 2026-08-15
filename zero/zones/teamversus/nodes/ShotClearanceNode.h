@@ -20,7 +20,11 @@ namespace teamversus {
 //
 //  1. Nothing in a ray-versus-bounding-box test knows terrain exists. A target on the far side of a
 //     wall produces a perfectly valid-looking intercept and the bot cheerfully fires into solid
-//     tiles. Bullets and bombs do not pass through walls; thors do.
+//     tiles. Bullets and bombs do not pass through walls; thors do - but a thor still explodes with
+//     the same splash when it finally stops, so passing through walls exempts it from the
+//     line-of-sight veto and from nothing else. Its blast is checked exactly like a bomb's, and the
+//     blast itself does not respect walls either, so a teammate sheltering behind terrain near the
+//     detonation is still hit.
 //
 //  2. A bomb's line of sight only has to be clear up to *proximity fuse range* of the target, not
 //     all the way to the aim point. The fuse triggers on ships only and never on terrain, so
@@ -52,8 +56,12 @@ namespace teamversus {
 // aimed does not make the bot more accurate; it just makes it refuse to fire at range, and a bot
 // that goes quiet in front of an enemy loses fights it would otherwise win.
 struct ShotClearanceNode : public behavior::BehaviorNode {
-  ShotClearanceNode(WeaponType weapon_type, const char* predicted_key, float hit_radius_multiplier)
-      : weapon_type(weapon_type), predicted_key(predicted_key), hit_radius_multiplier(hit_radius_multiplier) {}
+  ShotClearanceNode(WeaponType weapon_type, const char* predicted_key, float hit_radius_multiplier,
+                    float max_flight_time)
+      : weapon_type(weapon_type),
+        predicted_key(predicted_key),
+        hit_radius_multiplier(hit_radius_multiplier),
+        max_flight_time(max_flight_time) {}
 
   behavior::ExecuteResult Execute(behavior::ExecuteContext& ctx) override {
     Player* self = ctx.bot->game->player_manager.GetSelf();
@@ -85,7 +93,44 @@ struct ShotClearanceNode : public behavior::BehaviorNode {
       return behavior::ExecuteResult::Failure;
     }
 
+    // --- will it arrive before they can move? --------------------------------------------------
+    // A projectile leaves at our velocity plus the muzzle velocity, so our own motion is part of how
+    // fast the shot crosses the ground - and ground speed is what decides whether the target has
+    // time to dodge. Standing still, the shot travels at the bare muzzle speed of 12.5 tiles/sec,
+    // which is *slower than the ship it is chasing* (20.3 top speed): at 30 tiles that is a 2.4
+    // second flight, and the target gets to make several independent decisions inside it.
+    //
+    // Expressing this as a flight-time cap rather than a minimum speed makes it scale with range on
+    // its own, which is the behaviour we want. Up close the muzzle speed alone satisfies it and our
+    // velocity is irrelevant; the further out the target is, the more of our own speed has to be
+    // going into the shot before it is worth taking. It also falls out naturally in an orbit, where
+    // the in-out pump means the closing half of each cycle can take the shot and the receding half
+    // holds - which is the same accelerate-fire-reverse pattern real players volley with.
+    //
+    // Note the frame. This is a *world*-frame flight time, measured along the actual trajectory to
+    // the intercept point, and is a different quantity from InterceptAimNode's shooter-frame flight
+    // time - that one asks how long the solver has to extrapolate, this one asks how long the target
+    // has to react.
+    // How long the target is allowed to be given also depends on how fast *they* are travelling,
+    // which is a separate fact from which way their hull points and has to be read separately. A
+    // ship sitting still cannot exploit a long flight no matter how long it is; one already moving
+    // at 20 tiles/sec displaces a full ship length every twentieth of a second, so the same flight
+    // time is a far weaker shot against them. Scale the window down with their speed rather than
+    // treating every target as equally hard to lead.
+    float target_speed = ctx.blackboard.ValueOr<float>("target_speed", 0.0f);
+    float ship_max_speed = game.connection.settings.ShipSettings[self->ship].MaximumSpeed / 16.0f / 10.0f;
+
+    float mobility = ship_max_speed > 0.0f ? target_speed / ship_max_speed : 0.0f;
+    if (mobility > 1.0f) mobility = 1.0f;
+
+    float allowed_flight_time = max_flight_time * (1.0f - mobility * mobility_penalty);
+
+    float shot_speed = shot_velocity.Length();
+    if (intercept_distance / shot_speed > allowed_flight_time) return behavior::ExecuteResult::Failure;
+
     bool is_bomb = weapon_type == WeaponType::Bomb || weapon_type == WeaponType::ProximityBomb;
+
+    Vector2f cast_start = self->position + shot_direction * ship_radius;
 
     // --- line of sight -------------------------------------------------------------------------
     // Thors travel through walls, so a terrain check would only ever wrongly veto them.
@@ -98,21 +143,44 @@ struct ShotClearanceNode : public behavior::BehaviorNode {
       }
 
       if (cast_distance > 0.0f) {
-        Vector2f cast_start = self->position + shot_direction * ship_radius;
-
         CastResult result = game.GetMap().Cast(cast_start, shot_direction, cast_distance, self->frequency);
         if (result.hit) return behavior::ExecuteResult::Failure;
       }
     }
 
     // --- blast safety --------------------------------------------------------------------------
+    // A bomb explodes on whatever stops it first - an enemy's proximity fuse or a wall - and the
+    // blast is indiscriminate. It does not detonate *on* a teammate (WeaponManager skips
+    // same-frequency players in its collision scan, so a friendly in the lane is passed straight
+    // through), which is exactly why the question to ask is "who is near where it goes off", never
+    // "who is in the way".
     if (is_bomb || weapon_type == WeaponType::Thor) {
-      Vector2f detonation = self->position + shot_direction * intercept_distance;
-      float blast_radius = GetBlastRadius(game, GetBombLevel(game));
+      // Where does it actually detonate? The fuse trips at the target, but a wall short of them
+      // stops it sooner - and for bombs the line-of-sight test above deliberately casts *past* any
+      // terrain inside fuse range, so that case gets through the veto and has to be modelled here
+      // rather than assumed away. Thors ignore walls entirely.
+      float detonation_distance = intercept_distance;
 
-      // Us first. The blast is far bigger than the fuse, so a bomb thrown at something too close
-      // detonates inside our own radius.
-      if (detonation.DistanceSq(self->position) < blast_radius * blast_radius) {
+      if (weapon_type != WeaponType::Thor) {
+        CastResult terrain = game.GetMap().Cast(cast_start, shot_direction, intercept_distance, self->frequency);
+
+        if (terrain.hit && terrain.distance < detonation_distance) {
+          detonation_distance = terrain.distance;
+        }
+      }
+
+      Vector2f detonation = cast_start + shot_direction * detonation_distance;
+      float detonation_time = detonation_distance / shot_speed;
+
+      u16 bomb_level = GetBombLevel(game);
+
+      // Everyone is checked at where they are now *and* where they will be when it goes off. The
+      // blast happens in the future, and at 20 tiles/sec a ship covers two blast radii during a
+      // one-and-a-half second flight - so testing current positions alone clears bombs that our own
+      // team then flies into, which is the same frame-mixing mistake as aiming at a lead point in
+      // world space. Neither sample is authoritative on its own, so the worse of the two decides.
+      if (WorstBlastFraction(game, bomb_level, self->position, self->velocity, detonation, detonation_time) >=
+          self_blast_limit) {
         return behavior::ExecuteResult::Failure;
       }
 
@@ -122,7 +190,8 @@ struct ShotClearanceNode : public behavior::BehaviorNode {
 
         if (!IsLiveTeammate(game, *self, *mate)) continue;
 
-        if (mate->position.DistanceSq(detonation) < blast_radius * blast_radius) {
+        if (WorstBlastFraction(game, bomb_level, mate->position, mate->velocity, detonation, detonation_time) >=
+            team_blast_limit) {
           return behavior::ExecuteResult::Failure;
         }
       }
@@ -139,7 +208,39 @@ struct ShotClearanceNode : public behavior::BehaviorNode {
   // precision shot.
   float hit_radius_multiplier = 1.0f;
 
+  // Longest world-frame flight this weapon is allowed to accept, in seconds - i.e. how much warning
+  // we are willing to give the target. Tight for bullets, which need a real hit and are cheap enough
+  // to wait for a better one. Looser for bombs and thors, because a bomb that arrives late still
+  // denies the space it lands in and guiding an opponent is a legitimate use even when the shot was
+  // never going to connect.
+  float max_flight_time = 1.5f;
+
+  // How much of that window a target moving at full speed gives up. At 0.4 a stationary target may
+  // be shot at across the full flight time and one at the speed cap gets 60% of it.
+  float mobility_penalty = 0.4f;
+
+  // Blast tolerances, as a fraction of the bomb's maximum damage (750 here, 44% of a full tank).
+  //
+  // Expressed as damage rather than as "inside the blast radius" because blast damage falls off
+  // linearly from the centre - a bomb at the rim of its blast does literally nothing. A hard radius
+  // veto treats a graze at 9 tiles the same as a direct hit, and since the radius is 10 tiles while
+  // teammates sit at a p10 spacing of 8, that would refuse most of the bombs worth throwing.
+  //
+  // Ours is tighter than theirs: we are the one already committed to this fight, and self-inflicted
+  // damage lands on top of whatever the enemy is doing to us at the same moment.
+  float self_blast_limit = 0.15f;
+  float team_blast_limit = 0.25f;
+
  private:
+  // Blast damage fraction at whichever of a player's current and predicted positions is worse.
+  static float WorstBlastFraction(Game& game, u16 level, const Vector2f& position, const Vector2f& velocity,
+                                  const Vector2f& detonation, float seconds) {
+    float now = GetBlastDamageFraction(game, level, position.Distance(detonation));
+    float later = GetBlastDamageFraction(game, level, (position + velocity * seconds).Distance(detonation));
+
+    return now > later ? now : later;
+  }
+
   // tan(4.5 degrees) - half of the 9 degree step the ship's orientation is quantized to, and
   // therefore the irreducible angular error on every shot.
   static constexpr float kOrientationQuantizationTangent = 0.0787f;
