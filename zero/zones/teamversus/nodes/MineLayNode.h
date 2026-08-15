@@ -91,10 +91,17 @@ struct MineLayNode : public behavior::BehaviorNode {
   // toward the spot is as much of a problem as one already standing on it.
   float team_clearance_multiplier = 1.5f;
 
-  // A pursuer has to be closing at least this fast, in tiles/sec, to count.
-  float min_closing_speed = 4.0f;
-  // ...and be within this range, since the mine has to be somewhere they will actually reach.
-  float max_pursuer_distance = 30.0f;
+  // A pursuer has to be closing at least this fast, in tiles/sec, to count - and this is the whole
+  // point of the item rather than a detail. A mine is visible and stationary, so a chaser with time
+  // and room simply steers around it and we have spent the drop for nothing. Someone committed at
+  // speed is the opposite case: momentum is what makes a Subspace ship hard to redirect, thrust only
+  // acts along the heading, and at better than ten tiles a second they cannot kill and rebuild that
+  // much velocity inside the couple of seconds it takes them to arrive. The faster they are chasing,
+  // the less able they are to avoid what we leave behind.
+  float min_closing_speed = 10.0f;
+  // ...and be close enough that they reach it before they have thought about it. Further out and the
+  // mine is just a landmark they route around.
+  float max_pursuer_distance = 25.0f;
   // ...and be behind us rather than in front, as a dot product against our travel direction.
   float behind_threshold = -0.2f;
 

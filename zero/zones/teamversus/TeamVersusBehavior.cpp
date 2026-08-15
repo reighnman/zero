@@ -289,16 +289,16 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
         //    it must stay the last gate before the key press.
         .Sequence(CompositeDecorator::Success)
             .Selector()
-                // --- dire: something inbound is going to kill us --------------------------------
-                // Escalation order is portal, then decoy, then repel. Repel is last not because it
-                // is the weakest - it is the only one of the three that actually stops the damage
-                // and leaves us in position - but because it is the scarcest and the most
-                // universally applicable. Anything the other two can solve should be solved by them,
-                // so the repel is still there for the case nothing else covers.
+                // --- dire: something inbound is going to kill us, right now ---------------------
+                // Only the two items that do something about a shot already in the air belong here.
+                // Portal first because it is instant and total - it removes us from the shot rather
+                // than surviving it - with the repel behind it as the last resort. The repel is not
+                // last because it is weakest; it is the only one of the kit that actually stops the
+                // damage and leaves us in position. It is last because it is the scarcest and the
+                // most universally applicable, so anything the portal can solve should be.
                 .Sequence()
                     .Child<BlackboardSetQueryNode>("threat_lethal")
                     .Selector()
-                        // Instant and total: removes us from the fight rather than surviving it.
                         // The node checks the marker still exists and that the far end is an
                         // improvement, so this fails harmlessly when there is nowhere good to go.
                         .Sequence()
@@ -307,16 +307,9 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
                             .Child<WarpNode>()
                             .Child<ScalarNode>(1.0f, "bomb_slot_used")
                             .End()
-                        // Can't leave: make the next volley go somewhere else instead.
-                        .Sequence()
-                            .Child<DecoyDeceptionNode>()
-                            .Child<ItemCooldownNode>("decoy", kDecoyCooldownTicks)
-                            .Child<InputActionNode>(InputAction::Decoy)
-                            .Child<ScalarNode>(1.0f, "bomb_slot_used")
-                            .End()
-                        // Last resort. RepelDecisionNode additionally requires that the damage is
-                        // no longer dodgeable, so this does not fire on a lethal volley we still
-                        // have time to thrust out of.
+                        // RepelDecisionNode additionally requires that the damage is no longer
+                        // dodgeable, so this does not fire on a lethal volley we can still thrust
+                        // out of.
                         .Sequence()
                             .Child<RepelDecisionNode>()
                             .Child<ItemCooldownNode>("repel", kItemDebounceTicks)
@@ -326,17 +319,36 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
                         .End()
                     .End()
 
+                // --- breaking off: hurt, backing out, and being followed ------------------------
+                // The decoy is here rather than in the dire branch above because of what it does and
+                // does not do. It has no effect whatsoever on a shot already in the air, so gating it
+                // on an inbound lethal volley spends it at the one moment it cannot help. What it
+                // buys is the *next* volley being aimed at the wrong ship, which is worth exactly as
+                // much as our ability to be somewhere else by then - so the right moment is while
+                // disengaging at low health, breaking a pursuer's lock as we go.
+                .Sequence()
+                    .Child<BlackboardSetQueryNode>("phase_recover")
+                    .Child<DecoyDeceptionNode>()
+                    .Child<ItemCooldownNode>("decoy", kDecoyCooldownTicks)
+                    .Child<InputActionNode>(InputAction::Decoy)
+                    .Child<ScalarNode>(1.0f, "bomb_slot_used")
+                    .End()
+
+                // Mine the ground behind us while withdrawing from a fast pursuer. MineLayNode owns
+                // the posture and pursuit tests - it accepts Regroup as well as Recover, since
+                // walking back to the team is just as much a withdrawal to be covered.
+                .Sequence()
+                    .Child<MineLayNode>()
+                    .Child<ItemCooldownNode>("mine", kItemDebounceTicks)
+                    .Child<InputActionNode>(InputAction::Mine)
+                    .Child<ScalarNode>(1.0f, "bomb_slot_used")
+                    .End()
+
                 // --- housekeeping: nothing is currently trying to kill us -----------------------
                 .Sequence()  // Lay a marker while things are calm, so one exists when they aren't.
                     .Child<PortalLayNode>()
                     .Child<ItemCooldownNode>("portal", kItemDebounceTicks)
                     .Child<InputActionNode>(InputAction::Portal)
-                    .Child<ScalarNode>(1.0f, "bomb_slot_used")
-                    .End()
-                .Sequence()  // Mine the ground behind us while withdrawing from a pursuer.
-                    .Child<MineLayNode>()
-                    .Child<ItemCooldownNode>("mine", kItemDebounceTicks)
-                    .Child<InputActionNode>(InputAction::Mine)
                     .Child<ScalarNode>(1.0f, "bomb_slot_used")
                     .End()
                 .End()

@@ -12,11 +12,17 @@ namespace teamversus {
 // Decides when to drop a decoy - a temporary mirrored copy of ourselves that enemies have to sort
 // out from the real thing.
 //
-// This is scoped to escaping a losing position, not to setting one up. The measured human usage
-// points the other way (median 60% energy, median 37 tiles to the nearest enemy - a misdirect played
-// before the fight closes rather than after), but a decoy dropped at healthy energy is a decoy we do
-// not have at the moment we are actually about to die, and there are only two of them. So the whole
-// item budget goes to the dire case, alongside the portal, with the repel held back behind both.
+// This is scoped to one situation and one only: breaking away hurt. The tree requires the Recover
+// posture on top of everything below, so a decoy is never spent while we are pressing, poking, or
+// otherwise winning. The measured human usage points elsewhere (median 60% energy, median 37 tiles
+// to the nearest enemy - a misdirect played before the fight closes rather than after), but a decoy
+// dropped at healthy energy is a decoy we do not have while disengaging at 20%, and there are only
+// two of them.
+//
+// It is deliberately *not* gated on an inbound lethal volley, which is where it first sat. A decoy
+// has no effect whatsoever on a shot already in the air, so tying it to one spends it at the exact
+// moment it cannot help. What it buys is the next volley going to the wrong ship, which is worth
+// something only if we will be somewhere else by then - i.e. while withdrawing.
 //
 // What a decoy can and cannot do bounds when it is worth pressing:
 //
@@ -48,8 +54,9 @@ struct DecoyDeceptionNode : public behavior::BehaviorNode {
       return behavior::ExecuteResult::Failure;
     }
 
-    // Only when we are genuinely in trouble. Above this the item is better saved - we are still able
-    // to fight or to leave under our own power, and neither of those is improved by a decoy.
+    // Low health, checked here as well as through the posture gate in the tree. Recover is entered
+    // on a two-man local disadvantage as well as on energy, so the posture alone does not actually
+    // mean "hurt" and would let a healthy bot burn decoys every time it was momentarily outnumbered.
     float energy_percent = GetSelfEnergyPercent(game, *self);
     if (energy_percent > max_energy_percent) return behavior::ExecuteResult::Failure;
 
