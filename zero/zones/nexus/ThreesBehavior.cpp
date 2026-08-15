@@ -36,7 +36,6 @@
 #include <zero/zones/nexus/nodes/IncomingBlastDamageNode.h>
 #include <zero/zones/nexus/nodes/RocketUsageNode.h>
 #include <zero/zones/nexus/nodes/RushCommitmentNode.h>
-#include <zero/zones/nexus/nodes/SlowBombNode.h>
 #include <zero/zones/nexus/nodes/MineAvailableNode.h>
 #include <zero/zones/nexus/nodes/EnemiesNearTargetNode.h>
 #include <zero/zones/nexus/nodes/TeamFocusTargetNode.h>
@@ -286,30 +285,6 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
   // the exchange is still the plan. Note this is a deliberately conservative rule rather than a
   // copy of the human, who laid his at 5-12% energy as a last resort.
   constexpr float kMineMinEnergyPercent = 0.75f;
-
-  // --- Reverse-retreat bomb ---
-  // A bomb fired while backing away nose-on inherits our velocity and subtracts it from the muzzle
-  // speed, so it barely travels and sits in the chaser's path - a mine we didn't have to spend, and
-  // unlike a mine there's no one-at-a-time limit. See SlowBombNode for the mechanism.
-  //
-  // The ground-speed cap is the whole gate, because it is a statement about the RESULT rather than
-  // about the setup: anything that would send the bomb off at real speed fails it. 4 tiles/sec is
-  // slow enough to still be sitting there when a pursuer closing at 9+ arrives.
-  constexpr float kReverseBombMaxGroundSpeed = 4.0f;
-  // Same rear-cone as the mine (kMineRearConeDegrees) and the same reasoning on closing speed - the
-  // tactic works on someone driving into it and does nothing to someone drifting after us.
-  constexpr float kReverseBombClosingSpeed = 9.0f;
-  // Far enough that we're clear of our own blast by the time they reach the bomb - we're receding at
-  // retreat speed the whole time - and near enough that they can't simply steer around it.
-  constexpr float kReverseBombMinDistance = 7.0f;
-  constexpr float kReverseBombMaxDistance = 20.0f;
-  // Bombs are expensive (BombFireEnergy is a large fraction of max), and this fires precisely when
-  // we're hurt and running. Set at the retreat recovery floor so a bot that is recharging toward
-  // re-engagement can still throw one, without digging into the critical band it is retreating to
-  // escape.
-  constexpr float kReverseBombMinEnergyPercent = 0.35f;
-  // ~1.5s. Enough to leave a trail of them down a long chase without emptying our energy into it.
-  constexpr u32 kReverseBombCooldownTicks = 150;
 
   // --- Retreat lob: bombs at range, guns up close ---
   // Distinct from the reverse-retreat bomb above, which deliberately sheds its speed and hangs in the
@@ -967,35 +942,10 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                             .Child<InputActionNode>(InputAction::Mine)
                             .Child<TimerSetNode>("mine_timer", 500)
                             .End()
-                        .Sequence(CompositeDecorator::Success) // Bomb the chaser while backing away. Nose-on in reverse the bomb sheds its muzzle speed against our own and hangs in their path like a mine we didn't have to spend - see SlowBombNode.
-                            .InvertChild<InputQueryNode>(InputAction::Mine) //Never in the same tick as a real mine - both are the bomb key and the presses would collide
-                            .Child<PlayerEnergyPercentThresholdNode>(kReverseBombMinEnergyPercent)
-                            .Child<PursuedFromBehindNode>("nearest_target", kMineRearConeDegrees, kReverseBombClosingSpeed) //Same "actually being run down" test the mine uses, and for the same reason: this only works on someone driving into it
-                            .Child<SlowBombNode>(kReverseBombMaxGroundSpeed) //Gates on the RESULT - if the shot would leave at speed (nose not really back at them, or FleeNode holding broadside) this fails and we don't throw a bomb away
-                            .Child<DistanceThresholdNode>("nearest_target_position", "self_position", kReverseBombMinDistance)
-                            .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", kReverseBombMaxDistance)
-                            .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
-                            .Child<TimerExpiredNode>("reverse_bomb_timer")
-                            .InvertChild<TileQueryNode>(kTileIdSafe)
-                            .Selector() // Same wake-blast guard as the mine - this bomb barely travels, so it goes off roughly where we are standing now
-                                .InvertChild<NearestTeammatePlayerPositionQueryNode>("wake_teammate_position")
-                                .Child<DistanceThresholdNode>("wake_teammate_position", "self_position", kWakeBlastSafeDistance)
-                                .End()
-                            .Selector() // ...and nobody of ours sitting on the chaser who is going to set it off
-                                .InvertChild<NearestTeammatePlayerPositionQueryNode>("nearest_target", "wake_target_teammate_position")
-                                .Child<DistanceThresholdNode>("wake_target_teammate_position", "nearest_target_position", kWakeBlastSafeDistance)
-                                .End()
-                            .Child<InputActionNode>(InputAction::Bomb)
-                            .Child<TimerSetNode>("reverse_bomb_timer", kReverseBombCooldownTicks)
-                            .End()
-                        .Selector() // Steer clear of nearby walls before fleeing so we don't get pinned in a corner.
-                            .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kFleeWallLookaheadSeconds, "team_centroid") //Long flee horizon - a retreat commits to 30-55 tiles, so the cast has to reach that far or we pick a corridor that dead ends. Additive unless actually cornered, in which case it takes the Selector and the flee below is skipped so nothing pushes us back into the pocket.
-                            .Child<FleeNode>("nearest_aimshot", "flee_distance", 5.0f, kFleePanicEnergyPercent, "nearest_target_energy", "team_centroid", kFleeTeamBiasRadians) //Distance now scales with injury instead of being a fixed leash, and the panic threshold is raised - see FleeDistanceNode. The low-energy panic override is judged against whoever is chasing us; pointing it at "target_energy" meant a bot fleeing a healthy enemy at 3 tiles could suppress its own panic because the distant focus target it happened to be shooting was weaker.
-                            .End()
                         .Sequence(CompositeDecorator::Success) // Lob a bomb at a chaser we are holding at range. Past kRetreatBombMinDistance a bullet is mostly spent energy while a bomb's blast radius still forces the chaser to steer - see the constant for the measured hit rates. Sits ahead of the bullet check below, which declines to fire in the same tick as a bomb, so this is the choice between the two.
                             .Child<TimerExpiredNode>("match_startup")
                             .InvertChild<InputQueryNode>(InputAction::Mine) //Mine and bomb are the same key
-                            .InvertChild<InputQueryNode>(InputAction::Bomb) //The reverse-retreat bomb above may already have thrown one this tick
+                            .InvertChild<InputQueryNode>(InputAction::Bomb) //Defensive: nothing else in the retreat branch presses bomb now that the reverse-retreat block is gone, but the bullet check below keys off this to resolve the weapon choice
                             .Child<PlayerEnergyPercentThresholdNode>(kRetreatBombMinEnergyPercent)
                             .Child<DistanceThresholdNode>("nearest_target_position", "self_position", kRetreatBombMinDistance)
                             .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb)
