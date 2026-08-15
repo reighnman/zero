@@ -311,6 +311,26 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
   // ~1.5s. Enough to leave a trail of them down a long chase without emptying our energy into it.
   constexpr u32 kReverseBombCooldownTicks = 150;
 
+  // --- Retreat lob: bombs at range, guns up close ---
+  // Distinct from the reverse-retreat bomb above, which deliberately sheds its speed and hangs in the
+  // chaser's path at 7-20 tiles. This one is an ordinary aimed bomb thrown at a chaser we are holding
+  // at distance, and it exists because of what the two weapons are worth out there.
+  //
+  // Bullet hit rate falls off a cliff with range while a bomb keeps a 10-tile blast radius
+  // (BombExplodePixels 80 at level 1 = 160px) that does not care nearly as much about the aim error
+  // that ruins a bullet at the same distance. Measured ground-truth bullet hit rate in rec43:
+  // 46-65% inside 10 tiles, 15-43% at 10-19, but only 15-28% at 20-29 and 0-12% past 40. Past ~15
+  // tiles a bullet is mostly spent energy; a bomb is an area denial the chaser has to steer around.
+  //
+  // Below the gate distance the ordering flips - a bullet connects half the time and a bomb is 15x
+  // the energy for a shot the target can simply not be next to.
+  constexpr float kRetreatBombMinDistance = 15.0f;
+  // BombFireEnergy 300 is 17.6% of a 1700 tank, so a lob at 75% lands us at ~57% - still above the
+  // retreat fire floor and well clear of the critical band. Retreats run at a median 80% energy
+  // (the disadvantage trigger is relative, so we break off against a healthier enemy long before we
+  // are actually hurt), so this is live roughly half the time rather than being a rare luxury.
+  constexpr float kRetreatBombMinEnergyPercent = 0.75f;
+
   // --- Multifire ---
   // Multifire fans the shot instead of firing a single line: more energy per trigger, worse against
   // one target, better when several are bunched and a spread can catch more than one. Enemies
@@ -778,6 +798,7 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                         .Child<PlayerPositionQueryNode>("nearest_target", "nearest_target_position")
                         .Child<TargetAccelerationNode>("nearest_target", "nearest_target_acceleration")
                         .Child<PredictiveAimNode>(WeaponType::Bullet, "nearest_target", "nearest_target_acceleration", "nearest_aimshot", "nearest_aimshot_world", kAimLeadBiasSeconds)
+                        .Child<PredictiveAimNode>(WeaponType::Bomb, "nearest_target", "nearest_target_acceleration", "nearest_bomb_aimshot", "nearest_bomb_aimshot_world", kAimLeadBiasSeconds) //The retreat lob aims at whoever is chasing us, and bombs fly slower than bullets so they need their own solution
                         .End()
                      .Sequence(CompositeDecorator::Success) //Fight what the team is fighting, unless someone is already on top of us
                         .Child<DistanceThresholdNode>("nearest_target_position", "self_position", kSelfDefenseDistance) //If an enemy is right on us, deal with them instead
@@ -971,10 +992,32 @@ std::unique_ptr<behavior::BehaviorNode> ThreesBehavior::CreateTree(behavior::Exe
                             .Child<WallAvoidanceNode>(kWallCheckDistance, kWallOpeningDistance, kFleeWallLookaheadSeconds, "team_centroid") //Long flee horizon - a retreat commits to 30-55 tiles, so the cast has to reach that far or we pick a corridor that dead ends. Additive unless actually cornered, in which case it takes the Selector and the flee below is skipped so nothing pushes us back into the pocket.
                             .Child<FleeNode>("nearest_aimshot", "flee_distance", 5.0f, kFleePanicEnergyPercent, "nearest_target_energy", "team_centroid", kFleeTeamBiasRadians) //Distance now scales with injury instead of being a fixed leash, and the panic threshold is raised - see FleeDistanceNode. The low-energy panic override is judged against whoever is chasing us; pointing it at "target_energy" meant a bot fleeing a healthy enemy at 3 tiles could suppress its own panic because the distant focus target it happened to be shooting was weaker.
                             .End()
+                        .Sequence(CompositeDecorator::Success) // Lob a bomb at a chaser we are holding at range. Past kRetreatBombMinDistance a bullet is mostly spent energy while a bomb's blast radius still forces the chaser to steer - see the constant for the measured hit rates. Sits ahead of the bullet check below, which declines to fire in the same tick as a bomb, so this is the choice between the two.
+                            .Child<TimerExpiredNode>("match_startup")
+                            .InvertChild<InputQueryNode>(InputAction::Mine) //Mine and bomb are the same key
+                            .InvertChild<InputQueryNode>(InputAction::Bomb) //The reverse-retreat bomb above may already have thrown one this tick
+                            .Child<PlayerEnergyPercentThresholdNode>(kRetreatBombMinEnergyPercent)
+                            .Child<DistanceThresholdNode>("nearest_target_position", "self_position", kRetreatBombMinDistance)
+                            .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb)
+                            .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb)
+                            .InvertChild<TileQueryNode>(kTileIdSafe)
+                            .Child<BombBlastSafetyNode>("nearest_bomb_aimshot_world", kBombFriendlyBlastMargin) //Retreating means teammates are usually behind us rather than downrange, but a regrouping team puts them in the lane often enough to matter
+                            .Child<ShotLineOfSightNode>("nearest_bomb_aimshot_world", 0.0f, true) //Proximity-aware: the fuse trips on the ship, so only the lane up to prox range has to be clear
+                            .Child<RelativeShotVelocityNode>(WeaponType::Bomb, "retreat_bomb_fire_velocity")
+                            .Child<RayNode>("self_position", "retreat_bomb_fire_velocity", "retreat_bomb_fire_ray")
+                            .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "nearest_bomb_target_bounds", kBombProximityMultiplier)
+                            .Child<MoveRectangleNode>("nearest_bomb_target_bounds", "nearest_bomb_aimshot", "nearest_bomb_target_bounds")
+                            .Child<RayRectangleInterceptNode>("retreat_bomb_fire_ray", "nearest_bomb_target_bounds")
+                            .Child<InputActionNode>(InputAction::Bomb)
+                            .End()
                         .Sequence(CompositeDecorator::Success) // Keep shooting at whoever is chasing us. Backing off must not mean going silent - this branch takes the whole Selector, so the aim-and-shoot block below never runs while it is active, and without this a retreating bot fired nothing at all. In rec17 that produced a death spiral: outnumbered -> permanent retreat -> no return fire -> still outnumbered. The losing team fired 49-78 bullets all match against the winners' 136-239 and lost 12-0. FleeNode already faces the threat while retreating, so the heading is right and this only needs permission to pull the trigger.
                             .Child<TimerExpiredNode>("match_startup")
                             .Child<PlayerEnergyPercentThresholdNode>(kRetreatFireMinEnergyPercent) // Go quiet once the retreat is the only thing keeping us alive. Return fire is net-positive on energy but recovers 3.6x slower than silence, so down here it keeps us in the band we are retreating to escape - see kRetreatFireMinEnergyPercent.
                             .InvertChild<DistanceThresholdNode>("nearest_target_position", kMaxBulletRange)
+                            .Selector() // Guns are for close work, or for when a bomb is unaffordable. Beyond the gate distance with the energy to bomb, hold fire and let the lob above have it rather than spending the tank on bullets that mostly miss out there.
+                                .InvertChild<DistanceThresholdNode>("nearest_target_position", "self_position", kRetreatBombMinDistance)
+                                .InvertChild<PlayerEnergyPercentThresholdNode>(kRetreatBombMinEnergyPercent)
+                                .End()
                             .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
                             .InvertChild<InputQueryNode>(InputAction::Bomb)
                             .InvertChild<TileQueryNode>(kTileIdSafe)
