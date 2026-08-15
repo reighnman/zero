@@ -95,19 +95,67 @@ struct DriftCombatNode : public behavior::BehaviorNode {
     float speed_radial = self->velocity.Dot(radial);
     float speed_tangential = self->velocity.Dot(tangent);
 
+    // --- Committing to a kill: dive, don't orbit ----------------------------------------------
+    // An orbit is a way of applying pressure without being hit; a press is the decision that the
+    // pressure has worked and it is time to finish. Those want opposite movement, and running the
+    // orbit during a press does not merely dilute the dive, it cancels it: closing the range turns
+    // velocity from tangential into radial, tangential speed falls through min_orbit_speed, and the
+    // build-up branch below then swings the nose ninety degrees off the target and thrusts sideways
+    // to restore it. The bot dives, aborts, rebuilds, dives again - which is the hesitation that
+    // shows up as a bot dithering in front of something it should be killing, and it is also why the
+    // hull turn rate ran double the human's while the path barely bent.
+    //
+    // So a press goes straight at it. Force along the radial axis toward the target, nose on the aim
+    // point, no tangential requirement and no pump. A dead band around the standoff keeps it from
+    // alternating thrust across the boundary; inside it the force falls to zero and the ship coasts
+    // with the nose still tracking, which is what a finishing pass looks like.
+    if (ctx.blackboard.Has("phase_press")) {
+      // The dive goes at the target we decided to kill, not at whoever happens to be nearest.
+      // Holding range against the closest threat is the right anchor for an orbit, where the
+      // question is how much damage arrives; it is the wrong one for a commitment, where the whole
+      // decision was made about a specific ship's energy. Diving at a different one than the posture
+      // node was reasoning about is how a press ends with nobody dead.
+      Vector2f press_offset = self->position - *opt_target_position;
+      float press_radius = press_offset.Length();
+
+      if (press_radius >= 0.5f) {
+        Vector2f press_radial = press_offset * (1.0f / press_radius);
+        float error = press_radius - standoff;
+
+        if (fabsf(error) > press_dead_band) {
+          steering.force += press_radial * (error > 0.0f ? -max_speed : max_speed);
+        }
+      }
+
+      steering.Face(game, aimshot);
+      steering.SetRotationThreshold(rotation_threshold);
+
+      return behavior::ExecuteResult::Success;
+    }
+
     // --- Phase 1: get up to speed -------------------------------------------------------------
     // A ship with no lateral momentum has nothing to drift on, and it cannot acquire any while its
     // nose is locked on the target, because thrust only ever acts along the nose. So when we are not
     // yet moving across the enemy, that is the one time worth spending off-aim: point along the
     // orbit direction, open the rotation clamp so the hull can actually get there, and build the
     // momentum the rest of the fight is going to coast on.
-    if (speed_tangential < min_orbit_speed) {
+    //
+    // Hysteresis on the way out, because the entry and exit conditions are otherwise the same number
+    // and the ship sits on it: reaching the threshold hands control back to the drift, whose first
+    // act is to spend tangential speed on radial correction, which drops it under the threshold
+    // again. That oscillation is invisible in any per-tick check and shows up only as a hull sawing
+    // back and forth.
+    if (speed_tangential < (building ? resume_orbit_speed : min_orbit_speed)) {
+      building = true;
+
       steering.force += tangent * max_speed;
       steering.Face(game, self->position + tangent);
       steering.SetRotationThreshold(0.0f);
 
       return behavior::ExecuteResult::Success;
     }
+
+    building = false;
 
     // --- Phase 2: drift ------------------------------------------------------------------------
     // Now the nose goes on the target and stays there, and the *only* thing thrust is used for is
@@ -170,6 +218,15 @@ struct DriftCombatNode : public behavior::BehaviorNode {
   // the measured median closing speed so the orbit starts out at a realistic pace.
   float min_orbit_speed = 11.0f;
 
+  // ...and the speed the build-up has to reach before handing back to the drift. Above
+  // `min_orbit_speed` so the two are not the same number, which is what lets the ship settle on the
+  // boundary and saw between the phases.
+  float resume_orbit_speed = 15.0f;
+
+  // Tiles either side of the standoff where a press stops correcting and coasts. Without it the
+  // radial force alternates sign across the boundary every tick.
+  float press_dead_band = 2.0f;
+
   // How hard to chase a radial velocity error. Converts a speed error into an acceleration request;
   // only the sign ultimately reaches the ship, so this sets how readily the radial term outvotes the
   // centripetal one rather than how hard we push.
@@ -204,6 +261,7 @@ struct DriftCombatNode : public behavior::BehaviorNode {
 
  private:
   float orbit_direction = 0.0f;
+  bool building = false;
 
   // Pump state. `pump_sign` is +1 while drifting outward and -1 while closing.
   float pump_sign = 1.0f;

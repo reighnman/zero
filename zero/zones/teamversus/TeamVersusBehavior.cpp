@@ -315,8 +315,12 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
                 // last because it is weakest; it is the only one of the kit that actually stops the
                 // damage and leaves us in position. It is last because it is the scarcest and the
                 // most universally applicable, so anything the portal can solve should be.
+                // Gated on threat_unavoidable rather than threat_lethal, which is the difference
+                // between reacting to a hit that will finish us and reacting to one that will put us
+                // where the next hit finishes us. A shot only becomes individually lethal once we
+                // are already down to nothing, so a kill test fires after the fight is lost.
                 .Sequence()
-                    .Child<BlackboardSetQueryNode>("threat_lethal")
+                    .Child<BlackboardSetQueryNode>("threat_unavoidable")
                     .Selector()
                         // The node checks the marker still exists and that the far end is an
                         // improvement, so this fails harmlessly when there is nowhere good to go.

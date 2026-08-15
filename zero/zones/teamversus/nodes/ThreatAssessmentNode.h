@@ -227,15 +227,20 @@ struct ThreatAssessmentNode : public behavior::BehaviorNode {
       ctx.blackboard.Erase("threat_lethal");
     }
 
-    // The stronger flag, and the one that justifies spending a defensive item: this will kill us
-    // *even after we dodge as hard as we can*. The two conditions have to be tested together. A
-    // lethal volley we can still fly out of is a movement problem, and treating it as an item
-    // problem burns a repel on something a thrust would have cleared; an unavoidable volley we can
-    // survive is not a problem at all.
+    // The flag that justifies spending a defensive item: damage we cannot dodge out of, arriving in
+    // an amount that leaves us critically low.
     //
-    // Note this compares post-dodge damage rather than damage on the current course, which is the
-    // difference between "something lethal is pointed at me" and "I am going to be hit by it". The
-    // first is true constantly in a firefight.
+    // It used to test whether the volley would *kill* us, and that was too late by a wide margin.
+    // Measured across tv9, bots repelled at a median 7-21% energy having already absorbed 436-528
+    // damage in the preceding second, while the human repelled at 33% with nothing landing yet. That
+    // is the difference the threshold makes: a shot only becomes individually lethal once you are
+    // already down to nothing, so a kill test necessarily fires after the fight is lost rather than
+    // to prevent losing it. A repel exists to stop the hit that would put us in that state, not to
+    // fail to survive it.
+    //
+    // Testing post-dodge damage rather than damage on the current course remains the important half:
+    // that is the difference between "something dangerous is pointed at me" - true constantly in a
+    // firefight - and "I am going to be hit by it".
     //
     // The recharge that lands before impact is included because the comparison is against the energy
     // we will have when it hits, not the energy we have now. Without it a bot sitting exactly on the
@@ -247,7 +252,7 @@ struct ThreatAssessmentNode : public behavior::BehaviorNode {
     float max_energy = (float)game.ship_controller.ship.energy;
     if (energy_at_impact > max_energy) energy_at_impact = max_energy;
 
-    if (report.count > 0 && report.unavoidable_damage >= energy_at_impact) {
+    if (report.count > 0 && (energy_at_impact - report.unavoidable_damage) < max_energy * survival_floor) {
       ctx.blackboard.Set<bool>("threat_unavoidable", true);
     } else {
       ctx.blackboard.Erase("threat_unavoidable");
@@ -257,6 +262,12 @@ struct ThreatAssessmentNode : public behavior::BehaviorNode {
   }
 
   float check_distance = 20.0f;
+
+  // Energy, as a fraction of a full tank, below which being knocked is considered losing the fight
+  // rather than taking a hit. Sized from where the strong player actually spends a repel - around a
+  // third of a tank, before the damage lands, rather than at the 7-21% the bots were reaching by
+  // absorbing it first. Above this we are still in the exchange and an item is not the answer.
+  float survival_floor = 0.20f;
 };
 
 }  // namespace teamversus
