@@ -21,6 +21,7 @@
 #include <zero/zones/teamversus/nodes/MatchStateNode.h>
 #include <zero/zones/teamversus/nodes/MineLayNode.h>
 #include <zero/zones/teamversus/nodes/PortalEscapeNode.h>
+#include <zero/zones/teamversus/nodes/ReadyShotNode.h>
 #include <zero/zones/teamversus/nodes/RepelDecisionNode.h>
 #include <zero/zones/teamversus/nodes/ShotClearanceNode.h>
 #include <zero/zones/teamversus/nodes/TargetSelectNode.h>
@@ -298,11 +299,18 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
         // =====================================================================================
         .Selector()
             // --- before the match actually starts -------------------------------------------
-            // Keep formation and stay off the walls, but do not shoot and do not engage. The zone
-            // takes us out of spec some unknown time before "GO!", and opening fire during a ready
+            // Hold position, keep formation, stay off the walls - and fire exactly one bullet to
+            // signal ready. That shot is part of the match protocol, not combat: the zone waits
+            // for every player to confirm before it announces "GO!", so withholding it stalls the
+            // match indefinitely. ReadyShotNode owns the "did it actually leave the ship"
+            // bookkeeping; everything else stays quiet, since opening real fire during a ready
             // check is both wrong and conspicuous.
             .Sequence()
                 .InvertChild<BlackboardSetQueryNode>("match_live")
+                .Sequence(CompositeDecorator::Success)
+                    .Child<ReadyShotNode>()
+                    .Child<InputActionNode>(InputAction::Bullet)
+                    .End()
                 .Sequence(CompositeDecorator::Success)
                     .Child<TeamSpacingNode>(kMinTeamSpacing, kMaxTeamSpacing)
                     .End()

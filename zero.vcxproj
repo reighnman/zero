@@ -290,6 +290,7 @@
     <ClInclude Include="zero\zones\teamversus\nodes\MatchStateNode.h" />
     <ClInclude Include="zero\zones\teamversus\nodes\MineLayNode.h" />
     <ClInclude Include="zero\zones\teamversus\nodes\PortalEscapeNode.h" />
+    <ClInclude Include="zero\zones\teamversus\nodes\ReadyShotNode.h" />
     <ClInclude Include="zero\zones\teamversus\nodes\RepelDecisionNode.h" />
     <ClInclude Include="zero\zones\teamversus\nodes\ShotClearanceNode.h" />
     <ClInclude Include="zero\zones\teamversus\nodes\TargetSelectNode.h" />
