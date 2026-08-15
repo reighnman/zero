@@ -85,7 +85,21 @@ struct MineLayNode : public behavior::BehaviorNode {
   }
 
   // Don't drop below this fraction of max energy after paying for the mine.
-  float min_energy_after = 0.3f;
+  //
+  // This was 0.3 and it made the node unreachable, which is why seven bots laid zero mines across a
+  // whole match while every human in the corpus lays one or two per game. A landmine costs 500 of a
+  // 1700 tank - 29% - so a floor of 0.3 after payment demands 59% *before*, while the posture gate
+  // just above demands Recover or Regroup, and Recover is entered below 45% energy. The two
+  // conditions were very nearly disjoint: the only way to satisfy both was the rare Regroup or the
+  // outnumbered-at-full-health path.
+  //
+  // Two gates that cannot both be true is a silent feature deletion, and it does not announce
+  // itself - the branch simply never fires and nothing logs. Worth checking for wherever an energy
+  // floor sits underneath a posture that is itself defined by energy.
+  //
+  // 0.12 puts the requirement at ~41% before the drop, which brackets where humans actually lay
+  // them: median energy 33-55%, at 15-21 tiles from the nearest enemy.
+  float min_energy_after = 0.12f;
 
   // How much of the blast radius to keep clear of teammates. Above 1.0 because a teammate walking
   // toward the spot is as much of a problem as one already standing on it.
