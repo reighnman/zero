@@ -33,6 +33,7 @@
 #include <zero/zones/nexus/nodes/EnergyDisadvantageNode.h>
 #include <zero/zones/nexus/nodes/FinishableTargetNode.h>
 #include <zero/zones/nexus/nodes/TargetEnergyDropNode.h>
+#include <zero/zones/nexus/nodes/RelativeShotVelocityNode.h>
 #include <zero/zones/nexus/nodes/PredictiveAimNode.h>
 #include <zero/zones/nexus/nodes/TargetAccelerationNode.h>
 
@@ -333,10 +334,10 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                             .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
                             .InvertChild<InputQueryNode>(InputAction::Bomb)
                             .InvertChild<TileQueryNode>(kTileIdSafe)
-                            .Child<ShotVelocityQueryNode>(WeaponType::Bullet, "bullet_fire_velocity")
+                            .Child<RelativeShotVelocityNode>(WeaponType::Bullet, "bullet_fire_velocity")
                             .Child<RayNode>("self_position", "bullet_fire_velocity", "bullet_fire_ray")
                             .Child<DynamicPlayerBoundingBoxQueryNode>("nearest_target", "nearest_target_bounds", 4.0f)
-                            .Child<MoveRectangleNode>("nearest_target_bounds", "nearest_aimshot_world", "nearest_target_bounds")
+                            .Child<MoveRectangleNode>("nearest_target_bounds", "nearest_aimshot", "nearest_target_bounds")
                             .Child<RayRectangleInterceptNode>("bullet_fire_ray", "nearest_target_bounds")
                             .Child<ShotLineOfSightNode>("nearest_aimshot_world", kBulletBounceRange)  //Same terrain gate as the main fire check - retreating is when we're most likely to have terrain between us and the chaser
                             .Child<InputActionNode>(InputAction::Bullet)
@@ -420,10 +421,10 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                                 .InvertChild<DistanceThresholdNode>("nearest_target_position", 50.0f)  //dont bomb from too far
                                 .Child<BombBlastSafetyNode>("bomb_aimshot_world", kBombFriendlyBlastMargin)  //with no teammates this is a pure self-blast check - never bomb somewhere our own explosion catches us
                                 .Child<ShotLineOfSightNode>("bomb_aimshot_world", 0.0f, true)  //Bombs don't pass through walls, so the lane has to be clear - but only up to proximity range of the target, since the fuse trips on the ship first and terrain inside that last stretch can't stop the shot.
-                                .Child<ShotVelocityQueryNode>(WeaponType::Bomb, "bomb_fire_velocity") // check bomb velocity
+                                .Child<RelativeShotVelocityNode>(WeaponType::Bomb, "bomb_fire_velocity") // check bomb velocity
                                 .Child<RayNode>("self_position", "bomb_fire_velocity", "bomb_fire_ray") // check collision ray
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", kBombProximityMultiplier) // lob range, not a precise hit
-                                .Child<MoveRectangleNode>("target_bounds", "bomb_aimshot_world", "target_bounds")
+                                .Child<MoveRectangleNode>("target_bounds", "bomb_aimshot", "target_bounds")
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
                                 .Child<RenderRayNode>("world_camera", "bomb_fire_ray", 50.0f, Vector3f(1.0f, 1.0f, 0.0f))
                                 .Child<RayRectangleInterceptNode>("bomb_fire_ray", "target_bounds")
@@ -434,7 +435,7 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                                 .Child<TimerExpiredNode>("recharge_timer") // Ensure we're not still in a fleeing state
                                 .InvertChild<DistanceThresholdNode>("target_position", kMaxBulletRange) // Don't spray at ranges where bullets essentially never connect
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
-                                .Child<MoveRectangleNode>("target_bounds", "aimshot_world", "target_bounds")
+                                .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RenderRectNode>("world_camera", "target_bounds", Vector3f(1.0f, 0.0f, 0.0f))
                                 .Selector() // Energy gate on ordinary fire, bypassed while committed - a bot that has decided to end a fight has to be allowed to shoot, and by definition it is under every energy threshold here.
                                     .Child<BlackboardSetQueryNode>("rushing")
@@ -444,10 +445,10 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
                                 .InvertChild<InputQueryNode>(InputAction::Bomb) // Don't try to shoot a bullet when shooting a bomb.
                                 .InvertChild<TileQueryNode>(kTileIdSafe)
-                                .Child<ShotVelocityQueryNode>(WeaponType::Bullet, "bullet_fire_velocity")
+                                .Child<RelativeShotVelocityNode>(WeaponType::Bullet, "bullet_fire_velocity")
                                 .Child<RayNode>("self_position", "bullet_fire_velocity", "bullet_fire_ray")
                                 .Child<DynamicPlayerBoundingBoxQueryNode>("target", "target_bounds", 4.0f)
-                                .Child<MoveRectangleNode>("target_bounds", "aimshot_world", "target_bounds")
+                                .Child<MoveRectangleNode>("target_bounds", "aimshot", "target_bounds")
                                 .Child<RayRectangleInterceptNode>("bullet_fire_ray", "target_bounds")
                                 .Child<ShotLineOfSightNode>("aimshot_world", kBulletBounceRange)  //The intercept test above knows nothing about terrain, so a target behind a wall still produces a valid-looking shot. Bounce allowance kept for tight corners.
                                 .Child<InputActionNode>(InputAction::Bullet)
