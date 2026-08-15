@@ -104,7 +104,16 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   constexpr float kBombFriendlyBlastMargin = 6.0f;
 
   // Don't lob a bomb while actively reversing away from the target.
-  constexpr float kBombMinForwardVelocity = 0.0f;
+  // Throw the bomb while actually driving in at the target, so it leaves with our momentum on top of
+  // the muzzle speed instead of trailing off a drifting or reversing ship. 5 tiles/sec is a quarter
+  // of top speed - unambiguously closing, not merely not-reversing, which is all 0.0 asked for.
+  //
+  // This was 0.0 because an earlier 12-tile floor plus a strict momentum rule had suppressed bombs
+  // almost entirely (a human fired 71 while the bot he isolated fired 2). The floor is still gone and
+  // BombBlastSafetyNode still handles self-blast, so this is only the momentum half coming back, and
+  // it comes back as part of a pump whose inbound leg exists precisely to satisfy it. Watch the bomb
+  // count in the next recording against rec45's 370 - if it collapses, this is the first suspect.
+  constexpr float kBombMinForwardVelocity = 5.0f;
 
   // Bomb hitbox tolerance multiplier - deliberately generous. Bombs here are area denial, not
   // sniping: one that merely forces a dodge has done its job. A dodge-likelihood gate was tried on
@@ -130,9 +139,14 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   // The pump is NOT team logic and is shared rather than reimplemented - see EngagementPump.h. It
   // matters more here than anywhere: an opponent watching a single bot hold a fixed radius has the
   // easiest possible lead-shot problem, since the range at impact time is knowable in advance.
-  constexpr float kOrbitDistance = 14.4f;
-  constexpr float kPumpAmplitude = 4.0f;
-  constexpr u32 kPumpHalfPeriodTicks = 150;  // ~1.5s per leg
+  //
+  // Band moved to 15-25 tiles with the team trees (was 10.4-18.4). Same reasoning: hold at range,
+  // pump, put bullets and a bomb in on the inbound leg, and close only when a commit branch fires.
+  // The half period is deliberately equal to BombFireDelay (150 ticks), so one bomb goes out per
+  // inbound leg - change either number and that alignment is gone.
+  constexpr float kOrbitDistance = 20.0f;
+  constexpr float kPumpAmplitude = 5.0f;
+  constexpr u32 kPumpHalfPeriodTicks = 150;  // ~1.5s per leg, matched to BombFireDelay
 
   // Standoff to break off to, at full energy. FleeNode holds this as a kiting leash rather than
   // running, which is correct while healthy and wrong while hurt - so it is the *healthy* end of a
@@ -179,6 +193,10 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   // How long to keep pressing after the opponent loses energy while we still have more than they
   // do - a sustained window rather than a single-tick reaction.
   constexpr u32 kPressAdvantageTicks = 300;  // ~3s
+  // Stated outright rather than derived from kOrbitDistance, which it used to be as `* 2.0f`. Moving
+  // the pump band to 20 would have silently widened this from 28.8 to 40 tiles - past kMaxBulletRange
+  // (35) entirely, so the bot would commit forward at ranges it cannot even shoot from.
+  constexpr float kPressAdvantageMaxDistance = 28.0f;
 
   // Terrain handling. Detection scales with actual speed rather than a fixed radius, so the push
   // out of a pocket starts while there is still somewhere to go instead of once already wedged.
@@ -384,7 +402,7 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                                     .Child<BlackboardEraseNode>("orbit_direction") // pick a fresh orbit direction next time we're back to circling
                                     .End()
                                 .Sequence() // Press the advantage for a while after the opponent loses energy and now has meaningfully less than we do.
-                                    .InvertChild<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance * 2.0f) //still needs to be a fight we're actually in
+                                    .InvertChild<DistanceThresholdNode>("target_position", "self_position", kPressAdvantageMaxDistance) //still needs to be a fight we're actually in
                                     .Child<PlayerCurrentEnergyQueryNode>("self_energy")
                                     .Sequence(CompositeDecorator::Success) // (Re)arm the window on a fresh drop - it doesn't need to still be dropping for the window to hold.
                                         .Child<BlackboardSetQueryNode>("target_energy_dropped")
@@ -417,7 +435,8 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                                 .Child<VectorSubtractNode>("bomb_aimshot", "self_position", "target_direction", true) //check target aim
                                 .Child<PlayerVelocityQueryNode>("self_velocity") // get our current velocity
                                 .Child<VectorDotNode>("self_velocity", "target_direction", "forward_velocity")  // compare our velocity to target
-                                .Child<ScalarThresholdNode<float>>("forward_velocity", kBombMinForwardVelocity) // don't lob one while actively backing away
+                                .InvertChild<BlackboardSetQueryNode>("pump_outbound") // The bomb belongs to the INBOUND leg - released while still closing so it carries our momentum, with the leg flipping outward as it lands. kPumpHalfPeriodTicks equals BombFireDelay, so that is one bomb per pump.
+                                .Child<ScalarThresholdNode<float>>("forward_velocity", kBombMinForwardVelocity) // and actually closing, not merely pointed that way
                                 .Child<PlayerEnergyPercentThresholdNode>(0.45f) // ensure we have enough energy to fire
                                 .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb) // ensure bombs are ready to fire
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb) // ensure bombs are off cooldown

@@ -182,7 +182,16 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // lobbing one while actively reversing away from the target. The 12-tile floor is dropped
   // outright: BombBlastSafetyNode already keeps us outside our own blast using the real
   // BombExplodePixels radius, which is what that number was standing in for.
-  constexpr float kBombMinForwardVelocity = 0.0f;
+  // Throw the bomb while actually driving in at the target, so it leaves with our momentum on top of
+  // the muzzle speed instead of trailing off a drifting or reversing ship. 5 tiles/sec is a quarter
+  // of top speed - unambiguously closing, not merely not-reversing, which is all 0.0 asked for.
+  //
+  // This was 0.0 because an earlier 12-tile floor plus a strict momentum rule had suppressed bombs
+  // almost entirely (a human fired 71 while the bot he isolated fired 2). The floor is still gone and
+  // BombBlastSafetyNode still handles self-blast, so this is only the momentum half coming back, and
+  // it comes back as part of a pump whose inbound leg exists precisely to satisfy it. Watch the bomb
+  // count in the next recording against rec45's 370 - if it collapses, this is the first suspect.
+  constexpr float kBombMinForwardVelocity = 5.0f;
 
   // --- Rockets ---
   // A rocket is a short burst of extra thrust and a raised speed cap. It only converts into real
@@ -395,18 +404,27 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // landing comparable bullet accuracy. Holding a little further out costs some hit rate and buys
   // back more than that in damage avoided.
   //
-  // Note this puts the outer end of the pump (kPumpAmplitude, +/-4) at 18.4 tiles, past the
-  // accuracy cliff, where 12 used to keep the whole cycle underneath it. That is a deliberate
-  // trade rather than an oversight; if hit rate drops more than damage taken improves, trim the
-  // amplitude rather than pulling this back.
-  constexpr float kOrbitDistance = 14.4f;
+  // NOW THE CENTRE OF A 15-25 TILE STANDING-OFF BAND (was 14.4 with a +/-4 pump, i.e. 10.4-18.4).
+  // This is a deliberate move to a ranged harassment pattern rather than a close orbit: hold at
+  // range, pump in and out, put bullets and a bomb into the target on the inbound leg, and only
+  // close properly once a commit branch fires. The commits are what convert - the press-advantage
+  // window on a landed hit, the outnumber press on an isolated target, the rush and the finish - and
+  // they all still drive in to contact.
+  //
+  // Accepting the accuracy cost knowingly. Ground-truth bullet hit rate is 46-65% inside 10 tiles,
+  // 15-43% at 10-19 and 15-28% at 20-29, so the whole band now sits past the cliff. What buys it
+  // back is that the bomb does not care nearly as much - a 10-tile blast radius still forces a dodge
+  // off a near miss - and that the exchange table only turns bad when we are outnumbered, which the
+  // commit gates already check. If hit rate falls further than damage taken improves, trim the
+  // amplitude before pulling this back.
+  constexpr float kOrbitDistance = 20.0f;
 
   // An enemy inside this range is our problem regardless of what the rest of the team is doing -
   // we can't ignore someone shooting us in the face to go help elsewhere. Outside it, defer to the
   // team's focus target so four bots stop splitting into four separate duels.
   //
-  // This was 15, which quietly disabled the whole team-focus override: we orbit at kOrbitDistance
-  // (12) with a +/-4 pump, so the engaged target is almost always inside 15 tiles and the
+  // This was 15, which quietly disabled the whole team-focus override: we orbited at 12 with a +/-4
+  // pump, so the engaged target was almost always inside 15 tiles and the
   // self-defense exception fired essentially every tick. rec10 was the first match with team focus
   // enabled and the bot team's focus rate went *down* (52% against rec9's 61%), which is what that
   // looks like. The threshold has to be well inside normal fighting range to mean "on top of us"
@@ -427,11 +445,14 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
 
   // In-and-out oscillation applied on top of whichever base range is active, timed off the observed
   // rhythm: closing runs of a median 1.7s and back-off runs of 1.4s, each sweeping a median ~9-10
-  // tiles (p25 ~4). Amplitude is held to 4 rather than the full half-sweep so that the outer
-  // extreme of the supported cycle lands at 16 tiles instead of pushing past the accuracy cliff at
-  // 15 - the whole point of orbiting at 12 is to keep the cycle on the good side of it.
-  constexpr float kPumpAmplitude = 4.0f;
-  constexpr u32 kPumpHalfPeriodTicks = 150;  // ~1.5s per leg
+  // tiles (p25 ~4). With kOrbitDistance at 20 this puts the supported cycle at 15-25 tiles.
+  //
+  // The half period is deliberately equal to BombFireDelay (150 ticks, 1.5s). One bomb per inbound
+  // leg is exactly the intended rhythm - build momentum inward behind a few bullets, release the
+  // bomb while still closing so it carries our velocity, then the leg flips and we are already
+  // opening the range as it lands. Changing either number without the other breaks that alignment.
+  constexpr float kPumpAmplitude = 5.0f;
+  constexpr u32 kPumpHalfPeriodTicks = 150;  // ~1.5s per leg, matched to BombFireDelay
 
   // Bomb hitbox tolerance multiplier while orbiting - bigger than the bullet/thor multiplier below
   // so bombs land as area denial off a near miss instead of needing a precise direct hit, like
@@ -484,7 +505,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   constexpr float kLobBombMinEnergyPercent = 0.95f;
   // Both bounds up 30%. This is specifically the long run back to a fight that is already happening
   // somewhere else, not a ranged poke at whoever we are already circling: at 32 tiles we are well
-  // outside the engagement band (kOrbitDistance 14.4 plus pump) with a real approach still to make,
+  // outside the engagement band (kOrbitDistance 20 plus pump, so 15-25) with a real approach to make,
   // and the far bound reaches most of the way across the map so a bot rejoining from a spawn or a
   // long retreat is still contributing on the way in.
   constexpr float kLobBombMinDistance = 32.5f;
@@ -536,11 +557,15 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // while we still have more than they do - a sustained window instead of a single-tick reaction,
   // since TargetEnergyDropNode only reports the drop on the one tick it actually happened.
   constexpr u32 kPressAdvantageTicks = 300;  // ~3s
+  // Stated outright rather than derived from kOrbitDistance, which it used to be as `* 2.0f`. Moving
+  // the pump band to 20 would have silently widened this from 28.8 to 40 tiles - past kMaxBulletRange
+  // (35) entirely, so the bot would commit forward at ranges it cannot even shoot from.
+  constexpr float kPressAdvantageMaxDistance = 28.0f;
 
   constexpr float kAvoidTeamDistance = 6.0f;
 
   // Minimum spacing we insist on from *any* enemy, not just the one we're shooting. Set inside the
-  // inner edge of the engagement pump (kOrbitDistance - kPumpAmplitude = 10.4) so it only pushes
+  // inner edge of the engagement pump (kOrbitDistance - kPumpAmplitude = 15) so it only pushes
   // back when someone is closer than we ever intend to be, rather than fighting normal station
   // keeping.
   constexpr float kAvoidEnemyDistance = 10.0f;
@@ -956,7 +981,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                                     .Child<BlackboardEraseNode>("orbit_direction")
                                     .End()
                                 .Sequence() // Press the advantage for a while after the target loses energy (hit or spent shooting) and now has meaningfully less than we do.
-                                    .InvertChild<DistanceThresholdNode>("target_position", "self_position", kOrbitDistance * 2.0f) //still needs to be a fight we're actually in, not clear across the map
+                                    .InvertChild<DistanceThresholdNode>("target_position", "self_position", kPressAdvantageMaxDistance) //still needs to be a fight we're actually in, not clear across the map
                                     .Child<ScalarThresholdNode<float>>("local_advantage", 0.0f) //same reason as the rush above - committing forward only pays while we're not outnumbered
                                     .Selector() // Same repel reserve rule as the rush above - this branch also commits us forward.
                                         .Child<ShipItemCountThresholdNode>(ShipItemType::Repel, kRushRepelThreshold)
@@ -1014,7 +1039,8 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                                 .Child<VectorSubtractNode>("bomb_aimshot", "self_position", "target_direction", true) //check target aim
                                 .Child<PlayerVelocityQueryNode>("self_velocity") // get our current velocity
                                 .Child<VectorDotNode>("self_velocity", "target_direction", "forward_velocity")  // compare our velocity to target
-                                .Child<ScalarThresholdNode<float>>("forward_velocity", kBombMinForwardVelocity) // don't lob one while actively backing away from the target
+                                .InvertChild<BlackboardSetQueryNode>("pump_outbound") // The bomb belongs to the INBOUND leg. Driving in behind a few bullets and releasing it while still closing is what puts our momentum on top of the muzzle speed; the leg then flips and we are already opening the range as it lands. kPumpHalfPeriodTicks equals BombFireDelay, so this works out to one bomb per pump.
+                                .Child<ScalarThresholdNode<float>>("forward_velocity", kBombMinForwardVelocity) // and actually closing, not merely pointed that way - see kBombMinForwardVelocity
                                 .Child<PlayerEnergyPercentThresholdNode>(0.45f) // ensure we have enough energy to fire
                                 .Child<ShipWeaponCapabilityQueryNode>(WeaponType::Bomb) // ensure bombs are ready to fire
                                 .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bomb) // ensure bombs are off cooldown
