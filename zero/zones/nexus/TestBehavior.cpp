@@ -381,6 +381,20 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
   // bots died at 7.5-9.2% energy, and at 20% the killer is already inside 13 tiles.
   constexpr float kFleePanicEnergyPercent = 0.3f;
 
+  // --- Return fire while retreating: what it actually costs ---
+  // Recharge is `energy += (ship.recharge / 10) * dt` (ShipController.cpp:274), so at
+  // MaximumRecharge 1150 that is 115 energy/sec - 6.8% of a 1700 tank per second. BulletFireDelay 24
+  // caps sustained fire at 4.17 shots/sec, so:
+  //
+  //   single fire   20 * 4.17 = 83.3 energy/sec  -> net +31.7/sec, recovery 3.6x SLOWER than silent
+  //   multifire     35 * 4.17 = 145.8 energy/sec -> net -30.8/sec, energy FALLS while retreating
+  //
+  // That is the whole "retreats but never recovers" problem. Single fire stays on deliberately - this
+  // branch exists because a silent retreat produced a death spiral in rec17, and volume of fire is
+  // the one thing the skill split separates on. So this is a floor, not a throttle: go quiet only
+  // once each 20-energy bullet is a real fraction of the tank we are retreating to refill.
+  constexpr float kRetreatFireMinEnergyPercent = kFleePanicEnergyPercent;
+
   // Once within this distance of the target, stop closing further and circle instead - close
   // enough that they'll eventually fail to dodge a lobbed shot and we can dive in, far enough to
   // have room to maneuver instead of colliding.
@@ -700,6 +714,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                 .Selector(CompositeDecorator::Success) // Multifire covers ground rather than a point, so run it only when a spread can catch more than one enemy.
                     .Sequence() // Turn it on for a cluster we can afford to fan into.
                         .Child<ShipCapabilityQueryNode>(ShipCapability_Multifire)
+                        .Child<TimerExpiredNode>("recharge_timer") // never while breaking off - multifire costs more per second than recharge returns, so it makes a retreat lose energy outright
                         .Child<ScalarThresholdNode<float>>("enemies_near_target", kMultifireMinEnemies)
                         .Child<PlayerEnergyPercentThresholdNode>(kMultifireMinEnergyPercent)
                         .InvertChild<ShipMultifireQueryNode>()  //Check if multifire is off
@@ -709,6 +724,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                         .Child<ShipCapabilityQueryNode>(ShipCapability_Multifire)
                         .Child<ShipMultifireQueryNode>()  //Check if multifire is on
                         .Selector()
+                            .InvertChild<TimerExpiredNode>("recharge_timer") // breaking off to recharge - see kRetreatFireMinEnergyPercent for the arithmetic
                             .InvertChild<ScalarThresholdNode<float>>("enemies_near_target", kMultifireMinEnemies)
                             .InvertChild<PlayerEnergyPercentThresholdNode>(kMultifireMinEnergyPercent)
                             .End()
@@ -862,6 +878,7 @@ std::unique_ptr<behavior::BehaviorNode> TestBehavior::CreateTree(behavior::Execu
                             .Child<FleeNode>("nearest_aimshot", "flee_distance", 5.0f, kFleePanicEnergyPercent, "nearest_target_energy", "team_centroid", kFleeTeamBiasRadians) //The low-energy panic override has to be judged against whoever is chasing us. Pointing it at "target_energy" meant a bot fleeing a healthy enemy at 3 tiles could suppress its own panic because the distant focus target it happened to be shooting was weaker.
                             .End()
                         .Sequence(CompositeDecorator::Success) // Keep shooting at whoever is chasing us. Backing off must not mean going silent - this branch takes the whole Selector, so the aim-and-shoot block below never runs while it is active, and without this a retreating bot fired nothing at all. In rec17 that produced a death spiral: outnumbered -> permanent retreat -> no return fire -> still outnumbered. The losing team fired 49-78 bullets all match against the winners' 136-239 and lost 12-0. FleeNode already faces the threat while retreating, so the heading is right and this only needs permission to pull the trigger.
+                            .Child<PlayerEnergyPercentThresholdNode>(kRetreatFireMinEnergyPercent) // Go quiet once the retreat is the only thing keeping us alive. Return fire is net-positive on energy but recovers 3.6x slower than silence, so down here it keeps us in the band we are retreating to escape - see kRetreatFireMinEnergyPercent.
                             .InvertChild<DistanceThresholdNode>("nearest_target_position", kMaxBulletRange)
                             .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
                             .InvertChild<InputQueryNode>(InputAction::Bomb)

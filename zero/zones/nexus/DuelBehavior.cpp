@@ -147,6 +147,20 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   // bots died at 7.5-9.2% energy, and at 20% the killer is already inside 13 tiles.
   constexpr float kFleePanicEnergyPercent = 0.3f;
 
+  // --- Return fire while retreating: what it actually costs ---
+  // Recharge is `energy += (ship.recharge / 10) * dt` (ShipController.cpp:274), so at
+  // MaximumRecharge 1150 that is 115 energy/sec - 6.8% of a 1700 tank per second. BulletFireDelay 24
+  // caps sustained fire at 4.17 shots/sec, so:
+  //
+  //   single fire   20 * 4.17 = 83.3 energy/sec  -> net +31.7/sec, recovery 3.6x SLOWER than silent
+  //   multifire     35 * 4.17 = 145.8 energy/sec -> net -30.8/sec, energy FALLS while retreating
+  //
+  // That is the whole "retreats but never recovers" problem. Single fire stays on deliberately - this
+  // branch exists because a silent retreat produced a death spiral in rec17, and volume of fire is
+  // the one thing the skill split separates on. So this is a floor, not a throttle: go quiet only
+  // once each 20-energy bullet is a real fraction of the tank we are retreating to refill.
+  constexpr float kRetreatFireMinEnergyPercent = kFleePanicEnergyPercent;
+
   // Cruise at less than full speed unless committing to a kill or running. A ship already at
   // maximum has no acceleration left to dodge with and carries momentum it cannot cheaply reverse.
   constexpr float kCruiseSpeedPercent = 0.8f;
@@ -330,6 +344,7 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
                             .End()
                         .Sequence(CompositeDecorator::Success) // Keep shooting at whoever is chasing us. Backing off must not mean going silent - this branch takes the whole Selector, so the aim-and-shoot block below never runs while it is active. FleeNode already faces the threat while retreating, so the heading is right and this only needs permission to pull the trigger.
                             .Child<TimerExpiredNode>("match_startup")
+                            .Child<PlayerEnergyPercentThresholdNode>(kRetreatFireMinEnergyPercent) // Go quiet once the retreat is the only thing keeping us alive. Return fire is net-positive on energy but recovers 3.6x slower than silence, so down here it keeps us in the band we are retreating to escape - see kRetreatFireMinEnergyPercent.
                             .InvertChild<DistanceThresholdNode>("nearest_target_position", kMaxBulletRange)
                             .InvertChild<ShipWeaponCooldownQueryNode>(WeaponType::Bullet)
                             .InvertChild<InputQueryNode>(InputAction::Bomb)
