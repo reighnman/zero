@@ -88,30 +88,73 @@ struct DriftCombatNode : public behavior::BehaviorNode {
     Vector2f radial = to_self * (1.0f / radius);
     Vector2f tangent = Perpendicular(radial) * GetOrbitDirection(ctx, radial, *self);
 
-    float desired_radius = standoff + UpdatePump(standoff);
-
-    // Radial correction, capped so a large distance error does not swamp the tangential component
-    // and collapse the orbit into a straight-line charge.
-    float radius_error = desired_radius - radius;
-    float radial_speed = radius_error * radial_gain;
-
     float max_speed = Steering::GetMaxSpeed(game);
-    if (radial_speed > max_speed) radial_speed = max_speed;
-    if (radial_speed < -max_speed) radial_speed = -max_speed;
 
-    Vector2f desired_velocity = radial * radial_speed + tangent * orbit_speed;
+    // Split our current motion into the two axes that matter. Only the radial part is ours to
+    // command; the tangential part is momentum, and momentum is the whole point.
+    float speed_radial = self->velocity.Dot(radial);
+    float speed_tangential = self->velocity.Dot(tangent);
 
-    // Don't ask for more than the ship can do, or the force ends up dominated by an unreachable
-    // component and the direction of the request stops meaning anything.
-    float desired_speed = desired_velocity.Length();
-    if (desired_speed > max_speed && desired_speed > 0.0f) {
-      desired_velocity *= max_speed / desired_speed;
+    // --- Phase 1: get up to speed -------------------------------------------------------------
+    // A ship with no lateral momentum has nothing to drift on, and it cannot acquire any while its
+    // nose is locked on the target, because thrust only ever acts along the nose. So when we are not
+    // yet moving across the enemy, that is the one time worth spending off-aim: point along the
+    // orbit direction, open the rotation clamp so the hull can actually get there, and build the
+    // momentum the rest of the fight is going to coast on.
+    if (speed_tangential < min_orbit_speed) {
+      steering.force += tangent * max_speed;
+      steering.Face(game, self->position + tangent);
+      steering.SetRotationThreshold(0.0f);
+
+      return behavior::ExecuteResult::Success;
     }
 
-    steering.force += desired_velocity - self->velocity;
+    // --- Phase 2: drift ------------------------------------------------------------------------
+    // Now the nose goes on the target and stays there, and the *only* thing thrust is used for is
+    // pushing along that axis - forward to tighten in, reverse to open out. Nothing here asks for
+    // tangential acceleration, which is the correction that matters: asking for it produced a force
+    // pointing sideways relative to the nose, and a sideways force is exactly what Actuator cannot
+    // honour while holding an aim. It clamps the steering direction back to within
+    // `rotation_threshold` of the rotation target and then thrusts along *that*, so the lateral
+    // request was discarded every tick and what survived was a push straight at the enemy. The bot
+    // flew at whatever it was shooting at and called it an orbit.
+    //
+    // Expressed this way the geometry does the work instead. Nose on the target while travelling
+    // across it means the nose is already roughly perpendicular to the path, so forward thrust is
+    // pure centripetal - it bends the trajectory without bleeding the speed that makes the bend
+    // sharp - and reverse thrust bends it the other way without ever turning around. That is the
+    // whole trick: a ship at speed steers by pointing across its own path and choosing a thrust
+    // sign, and it gets to keep shooting down the nose at whatever it is passing while it does it.
+    //
+    // Only the *direction* of the accumulated force reaches the ship - Actuator normalizes it and
+    // uses it to pick forward or backward - so what is being computed here is which way along the
+    // radial axis we want to accelerate, not how hard.
+    float desired_radius = standoff + UpdatePump(standoff);
 
-    // Rotation target is the aim point, always. Movement is expressed purely as force and is
-    // allowed to pull the hull off aim only as far as the rotation threshold permits.
+    // Radial velocity we would like to have, from how far off the standoff we are.
+    float desired_radial_speed = (desired_radius - radius) * radial_gain;
+    if (desired_radial_speed > max_speed) desired_radial_speed = max_speed;
+    if (desired_radial_speed < -max_speed) desired_radial_speed = -max_speed;
+
+    float radial_accel = (desired_radial_speed - speed_radial) * approach_gain;
+
+    // Feed-forward the inward pull needed to hold a curve of this radius at this tangential speed.
+    // Without it the orbit unwinds - a ship travelling in a straight line past a target gains range
+    // every tick, so the radius controller spends its life chasing a drift it could have cancelled.
+    //
+    // Only applied from the standoff outwards. Inside it the term inverts the answer: v^2/r grows
+    // without bound as the radius shrinks, so a bot sitting at ten tiles wanting to be at
+    // twenty-three would compute more inward pull than the outward correction and thrust further in.
+    // It is also the case that the tight curve it is asking to hold there is not physically
+    // available - at eleven tiles/sec and ten tiles of radius the requirement is already above the
+    // ship's thrust - so the honest answer when too close is simply to push out and let the geometry
+    // open the range.
+    if (radius >= desired_radius) {
+      radial_accel -= (speed_tangential * speed_tangential) / radius;
+    }
+
+    steering.force += radial * radial_accel;
+
     steering.Face(game, aimshot);
     steering.SetRotationThreshold(rotation_threshold);
 
@@ -122,8 +165,15 @@ struct DriftCombatNode : public behavior::BehaviorNode {
   const char* target_position_key = nullptr;
   const char* standoff_key = nullptr;
 
-  // Tangential speed to try to maintain, in tiles/sec. Close to the measured median closing speed.
-  float orbit_speed = 13.0f;
+  // Lateral speed below which we stop aiming and go and get some. Not a speed to *hold* - nothing
+  // holds it, momentum does - just the point below which there is no drift to work with. Set near
+  // the measured median closing speed so the orbit starts out at a realistic pace.
+  float min_orbit_speed = 11.0f;
+
+  // How hard to chase a radial velocity error. Converts a speed error into an acceleration request;
+  // only the sign ultimately reaches the ship, so this sets how readily the radial term outvotes the
+  // centripetal one rather than how hard we push.
+  float approach_gain = 1.0f;
 
   // How hard to correct a radius error, as a desired radial speed per tile of error.
   //
@@ -144,10 +194,12 @@ struct DriftCombatNode : public behavior::BehaviorNode {
   u32 pump_min_ticks = 90;
   u32 pump_max_ticks = 210;
 
-  // How far off the aim point movement is allowed to drag the hull. 0.75 is a dot product, about 41
-  // degrees, which lands close to the measured share of shots taken within 30 degrees of the nose
-  // while still leaving room for real lateral thrust.
-  float rotation_threshold = 0.75f;
+  // How far off the aim point movement is allowed to drag the hull, as a dot product. Tight now, and
+  // it costs nothing to be tight: the only force this node produces during the drift lies along the
+  // radial axis, which is the aim axis, so there is no lateral request left for the clamp to fight.
+  // Leaving it loose would only let terrain avoidance and formation spacing - which do blend in
+  // sideways forces - pull the nose off a target it could otherwise hold.
+  float rotation_threshold = 0.95f;
 
   // Chance per pump reversal of also flipping the orbit direction. Occasionally reversing the
   // circle is a genuine evasive tool - it inverts the lead a shooter has been building - but doing
