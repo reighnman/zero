@@ -86,7 +86,7 @@ struct DriftCombatNode : public behavior::BehaviorNode {
     }
 
     Vector2f radial = to_self * (1.0f / radius);
-    Vector2f tangent = Perpendicular(radial) * GetOrbitDirection(ctx, radial, *self);
+    Vector2f tangent = Perpendicular(radial) * GetOrbitDirection(radial, *self);
 
     float max_speed = Steering::GetMaxSpeed(game);
 
@@ -201,42 +201,43 @@ struct DriftCombatNode : public behavior::BehaviorNode {
   // sideways forces - pull the nose off a target it could otherwise hold.
   float rotation_threshold = 0.95f;
 
-  // Chance per pump reversal of also flipping the orbit direction. Occasionally reversing the
-  // circle is a genuine evasive tool - it inverts the lead a shooter has been building - but doing
-  // it often would cancel out into no net tangential movement at all.
-  float reverse_chance = 0.25f;
 
  private:
   float orbit_direction = 0.0f;
-  PlayerId orbit_target = kInvalidPlayerId;
 
   // Pump state. `pump_sign` is +1 while drifting outward and -1 while closing.
   float pump_sign = 1.0f;
   Tick pump_tick = 0;
   u32 pump_duration = 0;
 
-  // Commits to one rotation direction for the engagement instead of recomputing it every tick,
-  // which would just cancel out into no rotation at all. Picks whichever way we are *already
-  // travelling*, so committing costs the least momentum to establish.
+  // Which way round the target we are going. This is read from our actual motion every tick rather
+  // than chosen and committed to, because in a drift it is not a decision at all - it is a fact
+  // about the momentum we already have, and the ship cannot contradict it without first spending
+  // all that momentum.
   //
-  // Travel, not facing. Those are two different vectors and in this movement model they are
-  // deliberately far apart - the measured offset between heading and direction of travel is 75-95
-  // degrees, and the whole point of the orbit is that the nose stays on the target while the ship
-  // moves across it. Choosing the orbit direction from where the nose points therefore says almost
-  // nothing about which way is cheap to turn into, and at a 90 degree offset it is a coin flip that
-  // routinely picks the direction that has to kill all our existing momentum first. Facing is only
-  // used as the fallback when we are barely moving and there is no travel direction to read.
-  float GetOrbitDirection(behavior::ExecuteContext& ctx, const Vector2f& radial, const Player& self) {
-    PlayerId target_id = ctx.blackboard.ValueOr<PlayerId>("target_id", kInvalidPlayerId);
+  // It used to be a committed choice that also flipped at random on a quarter of pump reversals, and
+  // that was the source of a measurable defect: flipping the sign makes the tangential speed read as
+  // strongly *negative*, which trips the get-up-to-speed branch below, which turns the hull ninety
+  // degrees off the target and thrusts. In tv8 that showed up as a hull turn rate of 114-131 deg/s
+  // against a velocity vector turning at only 54-67 - a nose slewing around a path that was not
+  // bending - where the human it was measured against runs 95 and 88. A ship reversing a real orbit
+  // has to decelerate through zero first; there is no way to command it directly, and pretending
+  // otherwise just produced a stutter.
+  //
+  // Reversals still happen, but as a consequence of radial maneuvering rather than an instruction.
+  float GetOrbitDirection(const Vector2f& radial, const Player& self) {
+    Vector2f tangent = Perpendicular(radial);
+    float along = self.velocity.Dot(tangent);
 
-    if (orbit_direction == 0.0f || target_id != orbit_target) {
-      Vector2f travel = self.velocity;
-      if (travel.LengthSq() < 1.0f) travel = self.GetHeading();
-
-      Vector2f tangent = Perpendicular(radial);
-      orbit_direction = tangent.Dot(travel) >= 0.0f ? 1.0f : -1.0f;
-      orbit_target = target_id;
+    // Genuinely no lateral motion to read - keep whatever we last committed to, or pick from the
+    // nose, so the build-up phase below has a consistent direction to work toward instead of
+    // thrashing between the two every tick.
+    if (fabsf(along) < 1.0f) {
+      if (orbit_direction == 0.0f) orbit_direction = tangent.Dot(self.GetHeading()) >= 0.0f ? 1.0f : -1.0f;
+      return orbit_direction;
     }
+
+    orbit_direction = along >= 0.0f ? 1.0f : -1.0f;
 
     return orbit_direction;
   }
@@ -249,10 +250,6 @@ struct DriftCombatNode : public behavior::BehaviorNode {
       pump_sign = -pump_sign;
       pump_tick = now;
       pump_duration = pump_min_ticks + (u32)(rand() % (int)(pump_max_ticks - pump_min_ticks + 1));
-
-      if ((float)rand() / (float)RAND_MAX < reverse_chance) {
-        orbit_direction = -orbit_direction;
-      }
     }
 
     float amplitude = pump_amplitude;

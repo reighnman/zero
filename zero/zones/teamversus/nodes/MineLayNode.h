@@ -64,11 +64,12 @@ struct MineLayNode : public behavior::BehaviorNode {
     }
 
     if (!IsWithdrawing(ctx, *self)) return behavior::ExecuteResult::Failure;
-    if (!HasPursuer(game, *self)) return behavior::ExecuteResult::Failure;
 
     // A mine detonates on blast just like a bomb, and does not care whose side stepped on it.
     float blast_radius = GetBlastRadius(game, ship.bombs > 0 ? (u16)(ship.bombs - 1) : (u16)0);
     float clearance = blast_radius * team_clearance_multiplier;
+
+    if (!HasPursuer(game, *self, blast_radius)) return behavior::ExecuteResult::Failure;
 
     auto& pm = game.player_manager;
     for (size_t i = 0; i < pm.player_count; ++i) {
@@ -105,6 +106,11 @@ struct MineLayNode : public behavior::BehaviorNode {
   // toward the spot is as much of a problem as one already standing on it.
   float team_clearance_multiplier = 1.5f;
 
+  // How far past the blast radius our own momentum has to carry us before the mine goes off. Above
+  // 1.0 for the same reason: the pursuer's closing speed is an estimate and arriving exactly at the
+  // rim of the blast is not clear of it.
+  float self_clearance_multiplier = 1.3f;
+
   // A pursuer has to be closing at least this fast, in tiles/sec, to count - and this is the whole
   // point of the item rather than a detail. A mine is visible and stationary, so a chaser with time
   // and room simply steers around it and we have spent the drop for nothing. Someone committed at
@@ -127,10 +133,24 @@ struct MineLayNode : public behavior::BehaviorNode {
     return ctx.blackboard.Has("phase_recover") || ctx.blackboard.Has("phase_regroup");
   }
 
-  bool HasPursuer(Game& game, const Player& self) const {
+  // A pursuer worth mining for, *and* one far enough back that our own momentum carries us clear of
+  // the blast before they reach it.
+  //
+  // That second half is the part that was missing, and it is why bots were laying mines with an
+  // enemy six to twelve tiles away against a ten tile blast radius - hurting themselves and any
+  // teammate nearby. The mine sits still at the point we drop it; the only thing that gets us out of
+  // its blast is our own velocity, over however long the pursuer takes to arrive. So the check is a
+  // race, and both sides of it have to be measured: how long until they trip it, and how far we will
+  // have travelled by then.
+  //
+  // It falls out sensibly at both ends. At six tiles with someone closing at twelve tiles/sec there
+  // is half a second before it goes off and we cover six tiles - inside the blast, so no mine. At
+  // twenty tiles that is over a second and a half, we cover twenty, and the mine is free.
+  bool HasPursuer(Game& game, const Player& self, float blast_radius) const {
     Vector2f travel = self.velocity;
-    if (travel.LengthSq() < 1.0f) return false;
-    travel = Normalize(travel);
+    float own_speed = travel.Length();
+    if (own_speed < 1.0f) return false;
+    travel = travel * (1.0f / own_speed);
 
     auto& pm = game.player_manager;
 
@@ -152,6 +172,16 @@ struct MineLayNode : public behavior::BehaviorNode {
       // Closing: their velocity relative to ours has a component pointed at us.
       float closing_speed = (enemy->velocity - self.velocity).Dot(-direction);
       if (closing_speed < min_closing_speed) continue;
+
+      // How long until they reach the ground we are standing on, at the speed they are covering it.
+      float approach_speed = enemy->velocity.Dot(-direction);
+      if (approach_speed < 1.0f) continue;
+
+      float seconds_to_trip = distance / approach_speed;
+
+      // Where we will be by then, travelling as we are now. Nothing else moves us clear - the mine
+      // does not travel and we cannot outrun our own momentum.
+      if (own_speed * seconds_to_trip < blast_radius * self_clearance_multiplier) continue;
 
       return true;
     }

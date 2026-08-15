@@ -88,6 +88,12 @@ struct EvasiveManeuverNode : public behavior::BehaviorNode {
     bool lethal = threat_damage >= self->energy * lethal_fraction;
     bool worth_breaking = avoidable >= max_energy * commit_damage_fraction;
 
+    // While committing to a kill, only death stops us. A push is a decision that the damage on the
+    // way in is worth paying, made by the posture node with the energy margin in hand - so a break
+    // here would silently overrule it, peel off at the first bomb, and hand back the range that the
+    // whole commitment was spent buying. Flying through survivable fire is the point.
+    if (ctx.blackboard.Has("phase_press")) worth_breaking = false;
+
     if (!lethal && !worth_breaking) {
       // Scale with how much it would hurt, so a graze produces a nudge and a near-fatal hit
       // produces a shove, without either taking over the tick.

@@ -169,6 +169,39 @@ struct ShotClearanceNode : public behavior::BehaviorNode {
         }
       }
 
+      // And - the part that was missing - any enemy standing between us and the target. A proximity
+      // fuse does not care which enemy it is: the bomb goes off at the first one it passes within
+      // fuse range of, which can be a great deal nearer than the ship we were aiming at. Firing a
+      // bomb at someone thirty tiles away while a different enemy sits at six detonates it at six,
+      // inside our own blast radius and very possibly inside a teammate's.
+      //
+      // The minimum-range gate in the tree cannot catch this, because it measures the range to the
+      // *chosen* target. This is what "bombing when an enemy is too close" actually looks like in
+      // the code, and it is invisible from the aim geometry alone.
+      {
+        float fuse_radius = GetProximityRadius(game, GetBombLevel(game));
+        auto& pm = game.player_manager;
+
+        for (size_t i = 0; i < pm.player_count; ++i) {
+          Player* enemy = pm.players + i;
+
+          if (!IsLiveEnemy(game, *self, *enemy)) continue;
+
+          Vector2f to_enemy = enemy->position - self->position;
+          float along = to_enemy.Dot(shot_direction);
+          if (along <= 0.0f || along > detonation_distance) continue;
+
+          float perpendicular_sq = to_enemy.LengthSq() - along * along;
+          if (perpendicular_sq >= fuse_radius * fuse_radius) continue;
+
+          // Where along the ray the bomb first comes inside fuse range of this ship.
+          float trip = along - sqrtf(fuse_radius * fuse_radius - perpendicular_sq);
+          if (trip < 0.0f) trip = 0.0f;
+
+          if (trip < detonation_distance) detonation_distance = trip;
+        }
+      }
+
       Vector2f detonation = cast_start + shot_direction * detonation_distance;
       float detonation_time = detonation_distance / shot_speed;
 

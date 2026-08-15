@@ -111,6 +111,21 @@ struct EngagementPhaseNode : public behavior::BehaviorNode {
   // energy, and this is the band where a dive converts.
   float press_target_energy = 0.35f;
 
+  // How much healthier than the target we have to be for the margin itself to justify closing, even
+  // through incoming fire.
+  //
+  // The reasoning is simply that energy *is* the trade. If neither side misses, the one who started
+  // with more is the one still alive at the end - so holding a margin means a straight exchange is
+  // already won, and there is nothing to be gained by circling at range waiting for a cleaner
+  // opening while they recharge the deficit away. Closing is what makes the damage land at all.
+  //
+  // The margin is a buffer rather than the win condition, and it is sized for two things that both
+  // cut against us: the enemy's energy is `HeuristicEnergyTracker`'s estimate rather than a fact,
+  // since SeeEnergy is off in this arena, and we do not hit as often as a good human does (bot
+  // bullet accuracy runs 18-33% in these recordings against phong's 36%), so an even trade is not
+  // actually even. A quarter of a tank is about two bullets of head start.
+  float press_energy_margin = 0.25f;
+
   // A target this far from their own support is cut off, which is the strongest single predictor of
   // a kill available. Well above the 27 tile baseline so we only react to genuine isolation.
   float press_target_isolation = 38.0f;
@@ -158,21 +173,43 @@ struct EngagementPhaseNode : public behavior::BehaviorNode {
       return EngagementPhase::Regroup;
     }
 
-    // A two-man local disadvantage is a rout at every range measured. Leave regardless of energy.
-    if (advantage <= -2.0f) return EngagementPhase::Recover;
+    // A two-man local disadvantage is a rout at every range measured. Leave regardless of energy -
+    // unless there is no team left, in which case there is nothing to preserve ourselves for and
+    // backing away from a 1v3 forever just loses it slowly.
+    if (advantage <= -2.0f && has_team) return EngagementPhase::Recover;
+
+    // The relative read, which is what was missing and why these bots never finished anyone off.
+    // Every press condition used to be an *absolute* threshold - our energy above a half, theirs
+    // below a third - so the ordinary situation of being meaningfully healthier than an opponent who
+    // is nonetheless not yet critical produced no push at all. The bot poked, they recharged, and
+    // the kill never landed.
+    //
+    // Energy is the whole of the trade in this game. If we hold a wide enough margin, we win the
+    // exchange even flying straight into it, because they run out first - and closing is the only
+    // way the damage actually lands, since kills happen at a median eleven tiles. So a margin is
+    // itself an opening, and it also waives the absolute floor below: at 30% against someone on 5%,
+    // pressing is correct and waiting is not.
+    bool stronger = self_energy_percent >= target_energy_percent + press_energy_margin;
+
+    bool opening = stronger || target_energy_percent <= press_target_energy ||
+                   target_isolation >= press_target_isolation || advantage >= 1.0f;
+
+    // Never push into a losing head-count. The exchange data is unambiguous that being down bodies
+    // costs more than any range advantage can return, so a lone bot diving three of them is simply
+    // feeding - the one exception being that our team is already gone, where the alternative is
+    // losing anyway.
+    bool numbers_ok = advantage >= 0.0f || !has_team;
+
+    bool can_afford = stronger || self_energy_percent >= press_min_energy;
+
+    if (opening && can_afford && numbers_ok && target_distance <= press_max_distance) {
+      return EngagementPhase::Press;
+    }
 
     bool recovering = phase == EngagementPhase::Recover;
     float energy_gate = recovering ? recover_exit_energy : recover_enter_energy;
 
     if (self_energy_percent < energy_gate) return EngagementPhase::Recover;
-
-    bool opening = target_energy_percent <= press_target_energy || target_isolation >= press_target_isolation ||
-                   advantage >= 1.0f;
-
-    if (opening && self_energy_percent >= press_min_energy && target_distance <= press_max_distance &&
-        advantage >= 0.0f) {
-      return EngagementPhase::Press;
-    }
 
     return EngagementPhase::Poke;
   }
