@@ -616,8 +616,30 @@ std::unique_ptr<behavior::BehaviorNode> TwosBehavior::CreateTree(behavior::Execu
   // Enter a defensive (recharging) state once our energy drops below this fraction of the
   // target's estimated energy, and don't leave it again until we recover past the higher exit
   // ratio - the gap between the two is a hysteresis band so we don't flicker near parity.
+  //
+  // EXIT WALKED BACK FROM 0.9. That band was far too wide, and it is the reason the bots looked like
+  // they spent most of the match backing off. SeeEnergy=None, so the target's energy is a
+  // HeuristicEnergyTracker estimate that only ever falls when we observe them take damage - an enemy
+  // who is sitting there doing nothing never takes any, so their estimate stays pinned near max and
+  // both ratios collapse into absolute thresholds: enter below 65%, refuse to re-engage until 90%.
+  //
+  // Measured over rec45, share of live samples:
+  //
+  //                sustained flee    below 65%    below 90%
+  //     bots           24-34%          24-45%       66-78%
+  //     phong            19%             75%          94%
+  //
+  // The human is hurt far more than the bots and flees considerably less, which rules out "they are
+  // fleeing because they are losing". They are fleeing because the exit condition is nearly
+  // unreachable: a bot is under 90% for two-thirds to three-quarters of its life, so every single
+  // dip below the enter ratio commits it to a long recovery it mostly cannot finish before being
+  // engaged again.
+  //
+  // 0.75 keeps a real hysteresis band - 10 points, comfortably more than the estimate's own jitter -
+  // while making the exit something a bot reaches during an ordinary lull rather than something it
+  // has to leave the fight to earn.
   constexpr float kEnergyDisadvantageEnterRatio = 0.65f;
-  constexpr float kEnergyDisadvantageExitRatio = 0.9f;
+  constexpr float kEnergyDisadvantageExitRatio = 0.75f;
   // Always treat energy this low as a disadvantage regardless of the target's energy, since being
   // critically low is dangerous even against an equally weak target.
   // Raised from 0.094. Bots were dying at 7.9-15.3% energy while the human died at 2.9%, so a floor

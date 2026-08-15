@@ -202,8 +202,15 @@ std::unique_ptr<behavior::BehaviorNode> DuelBehavior::CreateTree(behavior::Execu
   // Energy-relative retreat, identical to the team behaviors. Enters a defensive state once our
   // energy drops below this fraction of the opponent's, and doesn't leave until we recover past the
   // higher exit ratio - the gap is a hysteresis band so the decision doesn't flicker near parity.
+  //
+  // Exit walked back from 0.9 with the team trees. SeeEnergy=None means the opponent's energy is a
+  // HeuristicEnergyTracker estimate that only falls when we see them take damage, so both ratios act
+  // as absolute thresholds against anyone playing passively: enter below 65%, refuse to re-engage
+  // until 90%. Measured over rec45 the bots sit under 90% for 66-78% of their lives, so the exit was
+  // effectively unreachable and every dip below the enter ratio became a long retreat. 0.75 keeps a
+  // 10-point hysteresis band, well clear of the estimate's own jitter.
   constexpr float kEnergyDisadvantageEnterRatio = 0.65f;
-  constexpr float kEnergyDisadvantageExitRatio = 0.9f;
+  constexpr float kEnergyDisadvantageExitRatio = 0.75f;
   constexpr float kCriticalEnergyPercent = 0.18f;
 
   // Absolute floor on ENDING a retreat. The ratio test only says whether we're still losing the
