@@ -328,11 +328,24 @@ std::unique_ptr<behavior::BehaviorNode> FoursBehavior::CreateTree(behavior::Exec
   // Below the gate distance the ordering flips - a bullet connects half the time and a bomb is 15x
   // the energy for a shot the target can simply not be next to.
   constexpr float kRetreatBombMinDistance = 15.0f;
-  // BombFireEnergy 300 is 17.6% of a 1700 tank, so a lob at 75% lands us at ~57% - still above the
-  // retreat fire floor and well clear of the critical band. Retreats run at a median 80% energy
-  // (the disadvantage trigger is relative, so we break off against a healthier enemy long before we
-  // are actually hurt), so this is live roughly half the time rather than being a rare luxury.
-  constexpr float kRetreatBombMinEnergyPercent = 0.75f;
+  // The energy gate, and the one that was wrong. It was 0.75 on the assumption that retreats run at a
+  // median 80% energy - which was read off rec38 and does not hold. Measured over rec45, energy while
+  // backing off:
+  //
+  //   bots: p25 40-51%   median 51-67%   p75 68-83%
+  //
+  // so 75% covered only 15-32% of retreat time and the lob almost never fired. The distance gate was
+  // never the problem: >15 tiles is satisfied 81-86% of the time, because retreats sit at a median
+  // 28-33 tiles from the chaser.
+  //
+  // 0.60 is not a guess. A bomb costs BombFireEnergy 300 = 17.6% of a 1700 tank, so 0.60 is the
+  // lowest gate at which throwing one still leaves us above kRetreatFireMinEnergyPercent (0.40) -
+  // i.e. the bot can never bomb itself into the band where it stops shooting altogether. Anything
+  // lower and a lob silences the guns as a side effect, which is incoherent: it would spend 17.6% on
+  // a bomb from an energy level at which it refuses to spend 1.2% on a bullet.
+  //
+  // Coverage of backing-off samples past both gates, measured:  0.75 -> 15-32%,  0.60 -> 29-53%.
+  constexpr float kRetreatBombMinEnergyPercent = 0.60f;
 
   // --- Multifire ---
   // Multifire fans the shot instead of firing a single line: more energy per trigger, worse against
