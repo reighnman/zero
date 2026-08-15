@@ -16,7 +16,6 @@
 #include <zero/zones/teamversus/nodes/DriftCombatNode.h>
 #include <zero/zones/teamversus/nodes/EngagementPhaseNode.h>
 #include <zero/zones/teamversus/nodes/EvasiveManeuverNode.h>
-#include <zero/zones/teamversus/nodes/FireCadenceNode.h>
 #include <zero/zones/teamversus/nodes/InterceptAimNode.h>
 #include <zero/zones/teamversus/nodes/ItemCooldownNode.h>
 #include <zero/zones/teamversus/nodes/MatchStateNode.h>
@@ -168,7 +167,12 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
   // same thing to it: at 3 seconds a stationary ship may still shoot 37 tiles, while one whose own
   // motion is subtracting from the shot (5 tiles/sec of ground speed, which is where this zone's
   // bots were sitting at p10 against a human 14) is cut off past 15.
-  constexpr float kBulletMaxFlightTime = 3.0f;
+  // Calibrated to the strong player rather than the corpus median, because with the cadence node
+  // gone this is now the *only* thing between the bot and the trigger - and a ceiling set from the
+  // average of everyone reproduces the average's results. phong, 5-0 in tv4, accepts a bullet flight
+  // of p50 1.06s / p75 1.73 / p90 2.78; these bots were sitting at p50 1.9-2.2 with a p90 out past
+  // five seconds. 2.5 covers his p85 or so.
+  constexpr float kBulletMaxFlightTime = 2.5f;
   constexpr float kBombMaxFlightTime = 3.0f;
   constexpr float kThorMaxFlightTime = 3.0f;
   // Thors pass through walls, which is the entire reason to spend one: a target we cannot otherwise
@@ -580,10 +584,20 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
                                 .InvertChild<ScalarThresholdNode<float>>("local_advantage", 0.0f)
                                 .Child<PlayerEnergyPercentThresholdNode>(kBulletEnergyFloor)
                                 .End()
+                            // Shot quality is the *only* thing standing between us and the trigger,
+                            // deliberately. There used to be a cadence node here that drew a random
+                            // inter-shot gap from the distribution of human bullet-fire gaps, and
+                            // that was a category error: the gaps in a recording are an *outcome* of
+                            // how often a good shot existed, not a policy anyone was executing.
+                            // People hold fire until the shot is worth taking - they do not shoot
+                            // the same shots more slowly. Reproducing the gap distribution directly
+                            // throttled away good shots and let bad ones through at exactly the same
+                            // rate, and capped the bot at about 1.3 bullets/sec against a human 2.9.
+                            //
+                            // With it gone, rate of fire is whatever the geometry earns, which is
+                            // what it is for a person too.
                             .Child<ShotClearanceNode>(WeaponType::Bullet, "bullet_predicted", kBulletHitTolerance,
                                                      kBulletMaxFlightTime)
-                            .Child<FireCadenceNode>()  // Human trigger rhythm - runs last, so it only
-                                                       // consumes its budget on shots we actually take.
                             .Child<InputActionNode>(InputAction::Bullet)
                             .End()
                         .End()

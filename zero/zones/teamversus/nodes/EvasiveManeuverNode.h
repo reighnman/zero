@@ -49,6 +49,7 @@ struct EvasiveManeuverNode : public behavior::BehaviorNode {
     if (!self || self->ship >= 8) return behavior::ExecuteResult::Failure;
 
     float threat_damage = ctx.blackboard.ValueOr<float>("threat_damage", 0.0f);
+    float threat_unavoidable = ctx.blackboard.ValueOr<float>("threat_unavoidable_damage", 0.0f);
     float threat_count = ctx.blackboard.ValueOr<float>("threat_count", 0.0f);
     Vector2f escape_direction = ctx.blackboard.ValueOr<Vector2f>("threat_escape", Vector2f(0, 0));
 
@@ -62,12 +63,35 @@ struct EvasiveManeuverNode : public behavior::BehaviorNode {
     auto& game = *ctx.bot->game;
     auto& steering = ctx.bot->bot_controller->steering;
 
-    bool lethal = threat_damage >= self->energy * lethal_fraction;
+    float max_energy = (float)game.ship_controller.ship.energy;
 
-    if (!lethal) {
+    // How much of this we could actually make disappear by moving. ThreatAssessmentNode already
+    // computes what still lands after the best dodge available in the time remaining, so the
+    // difference is the part that is genuinely on offer.
+    float avoidable = threat_damage - threat_unavoidable;
+    if (avoidable < 0.0f) avoidable = 0.0f;
+
+    // Commit the tick to a break for two different reasons, and the second one is the important one.
+    //
+    // "It will kill me" is the obvious trigger and it is not enough on its own. The strong player in
+    // the tv4 recording took a maximum single hit of 362 raw across the whole match - about one and
+    // a half bullets - with nothing above 300 in nine cases out of ten, while these bots were eating
+    // hits of 620 to 811. A centred bomb is 750. He was not surviving bombs, he was never in one,
+    // and a bomb that does 500 to a bot at full health is entirely survivable and therefore never
+    // triggered a break under the old rule. Surviving it still costs a third of the tank and loses
+    // the next exchange.
+    //
+    // So the second trigger is on the damage that moving would remove, in absolute terms. Bullets
+    // are 212 and never reach it; anything blast-sized does. Testing the *avoidable* part rather
+    // than the total is what keeps it from firing on shots we are going to eat regardless, where
+    // giving up aim buys nothing at all.
+    bool lethal = threat_damage >= self->energy * lethal_fraction;
+    bool worth_breaking = avoidable >= max_energy * commit_damage_fraction;
+
+    if (!lethal && !worth_breaking) {
       // Scale with how much it would hurt, so a graze produces a nudge and a near-fatal hit
       // produces a shove, without either taking over the tick.
-      float severity = threat_damage / (float)game.ship_controller.ship.energy;
+      float severity = threat_damage / max_energy;
       float force = minimum_force + severity * survivable_force_scale;
 
       steering.force += escape_direction * force;
@@ -88,6 +112,11 @@ struct EvasiveManeuverNode : public behavior::BehaviorNode {
   // What fraction of our current energy an incoming volley has to threaten before we give up aim
   // for it. 1.0 means "only if it kills me".
   float lethal_fraction = 1.0f;
+
+  // Avoidable damage, as a fraction of a full tank, that justifies giving up aim for a tick even
+  // when it would not kill us. 0.25 of 1700 is 425 - comfortably above a 212 bullet and comfortably
+  // below a centred 750 bomb, so bullets are traded for and blasts are broken from.
+  float commit_damage_fraction = 0.25f;
 
   float minimum_force = 2.0f;
   float survivable_force_scale = 12.0f;

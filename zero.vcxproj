@@ -285,7 +285,6 @@
     <ClInclude Include="zero\zones\teamversus\nodes\DriftCombatNode.h" />
     <ClInclude Include="zero\zones\teamversus\nodes\EngagementPhaseNode.h" />
     <ClInclude Include="zero\zones\teamversus\nodes\EvasiveManeuverNode.h" />
-    <ClInclude Include="zero\zones\teamversus\nodes\FireCadenceNode.h" />
     <ClInclude Include="zero\zones\teamversus\nodes\InterceptAimNode.h" />
     <ClInclude Include="zero\zones\teamversus\nodes\ItemCooldownNode.h" />
     <ClInclude Include="zero\zones\teamversus\nodes\MatchStateNode.h" />

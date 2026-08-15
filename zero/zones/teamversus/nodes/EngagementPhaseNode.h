@@ -127,7 +127,13 @@ struct EngagementPhaseNode : public behavior::BehaviorNode {
   // from (bullets at a median 29 tiles), Press converges toward where kills actually land (median
   // 11 tiles), and Recover opens past effective return fire.
   float standoff_press = 10.0f;
-  float standoff_poke = 26.0f;
+  // Was 26, from the corpus-wide median firing range of 29 tiles. The strong player fights closer
+  // than the average one: phong's median firing range is 23.2 tiles and the enemy he is actually
+  // pointed at sits at 26.7, against 32-40 for these bots - and he was described as being closer to
+  // the enemy than anyone in the match while finishing it 5-0. Kills in the corpus land at a median
+  // 11 tiles regardless of where the poking happens from, so nothing is won by holding the outer
+  // edge of bullet range.
+  float standoff_poke = 23.0f;
   // Recover used to sit at 42, which no measured player ever holds. Humans down two or more heads
   // are at a median 16 tiles from their nearest enemy and *opening* at 3.5 tiles/sec - they break
   // range continuously rather than sprinting to a safe radius, because the people chasing them are
