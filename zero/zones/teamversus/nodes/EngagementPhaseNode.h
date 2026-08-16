@@ -100,7 +100,18 @@ struct EngagementPhaseNode : public behavior::BehaviorNode {
 
   // Energy at or below which we stop being willing to trade and start recovering, and the higher
   // level we must climb back to before rejoining. The gap is the hysteresis band.
-  float recover_enter_energy = 0.45f;
+  //
+  // Entry was 0.45, which is below the level at which a ship is already in trouble: the bot would
+  // make a firing pass, come out of it at half a tank, and - since 46% cleared the threshold - go
+  // straight back in as though nothing had been spent. Half energy against a healthy opponent is a
+  // trade we lose by definition, because energy *is* the trade. 0.55 makes "below half" mean
+  // disengage, which is what it should have meant all along.
+  //
+  // It also lines the posture up with the bullet energy floor, which sits at the same number: the
+  // energy at which we stop being willing to shoot and the energy at which we back off are the same
+  // fact about the fight, and having them differ is what produced a bot poking at a range it had no
+  // energy to shoot from.
+  float recover_enter_energy = 0.55f;
   float recover_exit_energy = 0.75f;
 
   // Minimum energy to commit to a dive. Killers in real matches averaged 50% energy at the moment
@@ -247,12 +258,38 @@ struct EngagementPhaseNode : public behavior::BehaviorNode {
     // been paid. Backing out and coming back costs more than finishing.
     bool can_afford = stronger || close_opening || self_energy_percent >= press_min_energy;
 
-    if (opening && can_afford && numbers_ok && target_distance <= press_max_distance) {
-      return EngagementPhase::Press;
-    }
-
+    // --- a withdrawal has to be allowed to finish ---------------------------------------------
+    // The missing piece, and the reason bots made a pass and immediately turned back into a fight
+    // they had just spent themselves in. Press is decided *before* the energy gate below, so nothing
+    // in the recover band actually held: a bot at 20% energy that satisfied any opening at all went
+    // straight back in on the next tick, and because openings are mostly facts about the enemy rather
+    // than about us, one nearly always did.
+    //
+    // The rule is not "never re-engage while hurt" - that would override the push logic, which is
+    // the thing that wins fights. It is that interrupting a withdrawal requires an actual
+    // *advantage*, not merely an opportunity:
+    //
+    //   - stronger: we hold the energy margin. This is the whole basis of the push and it survives
+    //     untouched, because if we are healthier than them then being at 40% is not a reason to leave
+    //     - they are the one who loses that exchange.
+    //   - advantage >= 0: two of us on one of them or better (the number excludes self). A body up is
+    //     a real advantage and worth spending our own energy on.
+    //   - last_alive: nobody else is fighting, so there is no later fight to preserve energy for.
+    //
+    // What does *not* interrupt it: a target who merely looks isolated, and a 1v1 we have no energy
+    // edge in. Those are openings, not advantages - they are reasons to fight when healthy, and at
+    // half a tank against a full one they are how a bot dies while its posture logic congratulates
+    // itself on being aggressive.
     bool recovering = phase == EngagementPhase::Recover;
     float energy_gate = recovering ? recover_exit_energy : recover_enter_energy;
+    bool withdrawing = recovering && self_energy_percent < energy_gate;
+
+    bool advantage_to_press = stronger || advantage >= 0.0f || last_alive;
+
+    if (opening && can_afford && numbers_ok && target_distance <= press_max_distance &&
+        (!withdrawing || advantage_to_press)) {
+      return EngagementPhase::Press;
+    }
 
     if (self_energy_percent < energy_gate) return EngagementPhase::Recover;
 

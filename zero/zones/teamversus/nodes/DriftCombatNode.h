@@ -184,10 +184,40 @@ struct DriftCombatNode : public behavior::BehaviorNode {
     // Only the *direction* of the accumulated force reaches the ship - Actuator normalizes it and
     // uses it to pick forward or backward - so what is being computed here is which way along the
     // radial axis we want to accelerate, not how hard.
-    float desired_radius = standoff + UpdatePump(standoff);
+    // --- Breaking off: open or hold, never turn back in ----------------------------------------
+    // The mirror image of the press branch above, and needed for the same reason. A withdrawal is a
+    // decision that this fight is not currently winnable, and an orbit is not a withdrawal - it is a
+    // band the ship oscillates around, so the inward half of every pump cycle walks straight back
+    // into the fight we just decided to leave, on a one-to-two second rhythm. Worse, the radius
+    // controller treats the standoff as a set point in both directions, so overshooting it produces
+    // an active push *back toward* the enemy while we are the weak one. That is the "make a pass and
+    // immediately go back in" behaviour, expressed in movement rather than in posture.
+    //
+    // So while recovering: the pump only swings outward, the radius is a floor rather than a set
+    // point, and the centripetal feed-forward is dropped. That last one matters - the feed-forward
+    // exists to stop an orbit unwinding, and unwinding *is* what a withdrawal looks like. Holding a
+    // clean circle around someone is re-engagement geometry.
+    //
+    // The nose stays on the aim throughout, so this is a fighting withdrawal rather than a flight:
+    // humans down two or more heads open at a measured +3.5 tiles/sec while still shooting, and a
+    // silent retreat is its own death spiral.
+    bool withdrawing = ctx.blackboard.Has("phase_recover");
+
+    float pump = UpdatePump(standoff);
+    if (withdrawing && pump < 0.0f) pump = 0.0f;
+
+    float desired_radius = standoff + pump;
 
     // Radial velocity we would like to have, from how far off the standoff we are.
     float desired_radial_speed = (desired_radius - radius) * radial_gain;
+
+    if (withdrawing) {
+      // Inside the standoff, break range at the rate humans actually break it. Outside it, simply
+      // never ask to close.
+      float floor_speed = radius < desired_radius ? withdraw_radial_speed : 0.0f;
+      if (desired_radial_speed < floor_speed) desired_radial_speed = floor_speed;
+    }
+
     if (desired_radial_speed > max_speed) desired_radial_speed = max_speed;
     if (desired_radial_speed < -max_speed) desired_radial_speed = -max_speed;
 
@@ -204,7 +234,7 @@ struct DriftCombatNode : public behavior::BehaviorNode {
     // available - at eleven tiles/sec and ten tiles of radius the requirement is already above the
     // ship's thrust - so the honest answer when too close is simply to push out and let the geometry
     // open the range.
-    if (radius >= desired_radius) {
+    if (!withdrawing && radius >= desired_radius) {
       radial_accel -= (speed_tangential * speed_tangential) / radius;
     }
 
@@ -248,6 +278,13 @@ struct DriftCombatNode : public behavior::BehaviorNode {
   // the latter clamped by top speed into a full-speed flight nobody does. At 0.35 the same two
   // situations produce -1.8 and +6.3, which sit either side of the human figures.
   float radial_gain = 0.35f;
+
+  // Outward radial speed to insist on while breaking off, in tiles/sec. Measured, not chosen: humans
+  // at a two-body local disadvantage open at +3.5 tiles/sec from a median 16 tiles, while these bots
+  // measured -0.8 - closing, while losing. It is deliberately a modest rate, because the people
+  // chasing are not slower than us and a full-speed flight is a race we cannot win; what it buys is a
+  // steady increase in their flight time while our energy comes back.
+  float withdraw_radial_speed = 3.5f;
 
   // How far the standoff swings either side of its nominal value, in tiles. The measured half-cycle
   // sweeps about 10 tiles, so half of that either way.

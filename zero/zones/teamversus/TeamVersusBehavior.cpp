@@ -611,8 +611,22 @@ std::unique_ptr<behavior::BehaviorNode> TeamVersusBehavior::CreateTree(behavior:
                             // outnumbered drops us into Recover, Recover means low energy, and low
                             // energy silenced the bullets. Saving energy while three people shoot at
                             // you saves it for nobody.
+                            //
+                            // And waived a third time while breaking off, which is the same mistake
+                            // in a different posture. Recover now begins at the same energy this
+                            // floor sits at, so without the waiver every withdrawal would be a
+                            // silent one - and a silent retreat is a documented death spiral, since
+                            // nothing discourages the pursuit.
+                            //
+                            // The arithmetic says it costs nothing anyway. A bullet is 20 energy
+                            // against a BulletFireDelay of 24 ticks, so firing flat out is 83
+                            // energy/sec while recharge is 115/sec: a bot shooting continuously
+                            // still recovers, and slightly faster than one that only backs away,
+                            // because the return fire is what buys the range. The floor's remaining
+                            // job is Regroup, where the shots would be crossing half the map.
                             .Selector()
                                 .Child<BlackboardSetQueryNode>("phase_press")
+                                .Child<BlackboardSetQueryNode>("phase_recover")
                                 .InvertChild<ScalarThresholdNode<float>>("local_advantage", 0.0f)
                                 .Child<PlayerEnergyPercentThresholdNode>(kBulletEnergyFloor)
                                 .End()
